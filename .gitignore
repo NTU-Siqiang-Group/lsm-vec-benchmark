@@ -1,0 +1,22 @@
+# --- experiment results: SEPARATE repo (results/.git) ---
+results/
+
+# --- large generated data: traces, scratch DBs, indices ---
+work/
+
+# --- run logs (large, transient) ---
+logs/
+
+# --- sibling code repos (own git repos; method + baselines) ---
+LSM-Vec-with-SA-HNSW/
+diskann/
+diskann_merge_src/
+spfresh/
+
+# --- compiled artifacts ---
+driver/spfresh_driver
+*.o
+*.so
+*.a
+__pycache__/
+*.pyc
