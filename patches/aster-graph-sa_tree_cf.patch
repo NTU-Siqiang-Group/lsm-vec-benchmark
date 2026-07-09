@@ -1,0 +1,47 @@
+diff --git a/include/rocksdb/graph.h b/include/rocksdb/graph.h
+index 653c437f2..324db4a1f 100755
+--- a/include/rocksdb/graph.h
++++ b/include/rocksdb/graph.h
+@@ -453,6 +453,9 @@ class RocksGraph {
+     column_families.emplace_back("eprop_val", options);
+     options.merge_operator = nullptr;
+     column_families.emplace_back("vprop_val", options);
++    // SA-HNSW layer-0 on-disk state (cluster blobs, membership, ghost counter).
++    // Plain KV column family, no merge operator. See LSM-Vec SA_tree_on_disk_plan.md.
++    column_families.emplace_back("sa_tree", options);
+     std::vector<ColumnFamilyHandle*> handles;
+     if (auto_reinitialize_) {
+       DestroyDB(db_path_, options);
+@@ -470,6 +473,7 @@ class RocksGraph {
+     adj_cf_ = handles[0];
+     edge_prop_cf_ = handles[1];
+     vertex_prop_cf_ = handles[2];
++    sa_tree_cf_ = handles[3];
+   }
+ 
+   ~RocksGraph() {
+@@ -478,6 +482,7 @@ class RocksGraph {
+     db_->DestroyColumnFamilyHandle(adj_cf_);
+     db_->DestroyColumnFamilyHandle(edge_prop_cf_);
+     db_->DestroyColumnFamilyHandle(vertex_prop_cf_);
++    db_->DestroyColumnFamilyHandle(sa_tree_cf_);
+     db_->SyncWAL();
+     db_->Close();
+     // delete db_;
+@@ -499,6 +504,7 @@ class RocksGraph {
+                             std::vector<node_id_t>& out_neighbors,
+                             std::vector<node_id_t>& in_neighbors);
+   DB* get_raw_db() { return db_; }
++  ColumnFamilyHandle* sa_tree_cf() { return sa_tree_cf_; }
+   Status DeleteEdge(node_id_t from, node_id_t to);
+   Status GetAllEdges(node_id_t src, Edges* edges);
+   node_id_t GetOutDegree(node_id_t id);
+@@ -677,7 +683,7 @@ class RocksGraph {
+   node_id_t random_walk(node_id_t start, float decay_factor = 0.20);
+   DB* db_;
+   // bool is_lazy_;
+-  ColumnFamilyHandle *adj_cf_, *edge_prop_cf_, *vertex_prop_cf_;
++  ColumnFamilyHandle *adj_cf_, *edge_prop_cf_, *vertex_prop_cf_, *sa_tree_cf_;
+   CountMinSketch cms_out;
+   CountMinSketch cms_in;
+   MorrisCounter mor;

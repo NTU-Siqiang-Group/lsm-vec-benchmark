@@ -1,0 +1,16 @@
+[submodule "LSM-Vec-with-SA-HNSW"]
+	path = LSM-Vec-with-SA-HNSW
+	url = https://github.com/qyz-thu/LSM-Vec-with-SA-HNSW.git
+	branch = sa-resident-sketch
+[submodule "diskann"]
+	path = diskann
+	url = https://github.com/microsoft/DiskANN.git
+	branch = cpp_main
+[submodule "diskann_merge_src"]
+	path = diskann_merge_src
+	url = https://github.com/Yuming-Xu/DiskANN_Baseline.git
+	branch = diskv2
+[submodule "spfresh"]
+	path = spfresh
+	url = https://github.com/SPFresh/SPFresh.git
+	branch = main

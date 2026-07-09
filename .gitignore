@@ -8,10 +8,6 @@ work/
 logs/
 
 # --- sibling code repos (own git repos; method + baselines) ---
-LSM-Vec-with-SA-HNSW/
-diskann/
-diskann_merge_src/
-spfresh/
 
 # --- compiled artifacts ---
 driver/spfresh_driver

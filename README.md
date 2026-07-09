@@ -5,10 +5,12 @@ A reproducible benchmark that compares **LSM-Vec (SA-HNSW, "ours")** against **D
 **recall, query latency, insert throughput, build time, and — the headline — DRAM footprint** as the
 index churns over time.
 
-This repo is the **framework/orchestration** only. The experiment outputs (raw data + figures) live in
-a **separate results repo**; the systems under test live in **sibling code repos** (see Prerequisites).
+This repo is the **framework/orchestration**. The four systems under test are included as **git
+submodules** (clone with `--recursive` — see §3.1). The experiment outputs (raw data + figures) live in
+a **separate results repo**.
 
-- Method + baseline code: sibling repos (built separately).
+- Systems under test: submodules `LSM-Vec-with-SA-HNSW/`, `diskann/`, `diskann_merge_src/`, `spfresh/`
+  (+ our patches in `patches/`).
 - Results (raw/dat/fig + a detailed writeup): `github.com/volatill/lsm_vec_results` (`RESULTS.md` there).
 
 ---
@@ -49,6 +51,8 @@ driver/
   mem_sampler.py    external RSS sampler (wraps baseline processes; ours samples in-process)
   trace_format.md   on-disk trace format spec
 plot/               paper-style Matplotlib plotters (style, dat reader, timeseries/bar/pareto)
+patches/            local patches + new driver sources to apply to the submodules (see §3.1)
+LSM-Vec-with-SA-HNSW/  diskann/  diskann_merge_src/  spfresh/   ← submodules (systems under test)
 work/               generated traces + scratch DBs/indices  (gitignored — large)
 results/            raw/ dat/ fig/  (gitignored here — versioned in the separate results repo)
 CLAUDE.md           agent guidance + key build facts
@@ -59,21 +63,42 @@ CLAUDE.md           agent guidance + key build facts
 
 ## 3. Prerequisites
 
-### 3.1 Sibling code repos (built separately, placed next to this repo)
+### 3.1 Systems under test — **git submodules**
 
-The scripts assume this layout (the benchmark root and the systems are siblings). Paths are currently
-absolute (`/home/dmo/lsm_vec_benchmark`) in `run_spfresh.sh` — adjust `ROOT`/paths for your machine.
+The four systems are **submodules** of this repo, pinned to the exact commits used for the published
+results. Clone recursively, then apply the small local patches we carry in `patches/` (each system needs
+minor modifications — the file-I/O build for SPFresh, the merge driver for DiskANN, the `sa_tree` column
+family for ours), and drop in the two new driver sources.
 
-| dir | what | build | binary used |
+```bash
+git clone --recursive git@github.com:NTU-Siqiang-Group/lsm-vec-benchmark.git
+cd lsm-vec-benchmark
+# (already cloned without --recursive? run:  git submodule update --init --recursive)
+
+# apply our local patches (tracked-file diffs) + add the new driver sources:
+(cd diskann           && git apply ../patches/diskann.patch)
+(cd diskann_merge_src && git apply ../patches/diskann_merge_src.patch)
+(cd spfresh           && git apply ../patches/spfresh.patch)
+(cd LSM-Vec-with-SA-HNSW/lib/aster && git apply ../../../patches/aster-graph-sa_tree_cf.patch)  # sa_tree CF
+cp patches/newfiles/diskann_merge_src/tests/bench_stream_merge.cpp diskann_merge_src/tests/
+cp patches/newfiles/diskann/apps/bench_stream_diskann.cpp          diskann/apps/                 # optional
+```
+
+| submodule | what | pinned to | build → binary |
 |---|---|---|---|
-| `LSM-Vec-with-SA-HNSW/` | **ours** (branch `sa-resident-sketch`) | patch `lib/aster/include/rocksdb/graph.h` to add the `sa_tree` column family (see that repo's docs / the `aster-sa-tree-cf-patch` note), then `make aster && make all`, then `cmake --build build --target bench_streaming` | `LSM-Vec-with-SA-HNSW/build/bin/bench_streaming` |
-| `diskann/` | DiskANN (microsoft/DiskANN, cpp_main) | its standard CMake build → `diskann/build/apps` | `diskann/build/apps/utils/compute_groundtruth` (used for large-scale ground truth) |
-| `diskann_merge_src/` | FreshDiskANN merge driver (diskv2 fork) | CMake → `diskann_merge_src/build/tests` | `diskann_merge_src/build/tests/bench_stream_merge` |
-| `spfresh/` | SPFresh + SPANN+ (file-I/O mode, **no SPDK**) | its build → `spfresh/Release/`; needs a RocksDB fork built with RTTI at a separate prefix | `spfresh/Release/ssdserving` (+ `driver/spfresh_driver` auto-compiled) |
+| `LSM-Vec-with-SA-HNSW/` | **ours** (SA-HNSW) | `qyz-thu/LSM-Vec-with-SA-HNSW` @ `sa-resident-sketch` | `make aster && make all`, then `cmake --build build --target bench_streaming` → `build/bin/bench_streaming` |
+| `diskann/` | DiskANN (used for ground truth) | `microsoft/DiskANN` @ `cpp_main` | standard CMake → `build/apps/utils/compute_groundtruth` |
+| `diskann_merge_src/` | FreshDiskANN merge (DiskANN-merge) | `Yuming-Xu/DiskANN_Baseline` @ `diskv2` | CMake → `build/tests/bench_stream_merge` |
+| `spfresh/` | SPFresh + SPANN+ (file-I/O, **no SPDK**) | `SPFresh/SPFresh` @ `main` | its build → `Release/ssdserving` (+ `driver/spfresh_driver`, auto-compiled by `run_spfresh.sh`) |
 
-> **Aster patch:** upstream Aster lacks the `sa_tree` CF that the `sa-resident-sketch` branch needs. The
-> patch to `graph.h` is a working-tree change in the `lib/aster` submodule (not committed). Re-apply it
-> before building ours.
+**Two dependencies the submodules do *not* capture (manual, once):**
+- **SPFresh needs a RocksDB fork built with RTTI** at a separate prefix (its posting store is static-linked
+  against it). Without it the file-I/O backend won't link. See the SPFresh build notes.
+- `run_spfresh.sh` hardcodes `ROOT=/home/dmo/lsm_vec_benchmark` — edit it for your checkout path.
+
+*(Why patches instead of committing to the submodules? Three of the four upstreams aren't ours to write
+to, and the changes are small build/driver tweaks — carrying them as `patches/*.patch` keeps the
+submodules pointing at clean upstream commits.)*
 
 ### 3.2 Datasets
 

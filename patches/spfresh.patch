@@ -1,0 +1,147 @@
+diff --git a/AnnService/CMakeLists.txt b/AnnService/CMakeLists.txt
+index 0330796..69a8203 100644
+--- a/AnnService/CMakeLists.txt
++++ b/AnnService/CMakeLists.txt
+@@ -12,7 +12,11 @@ set(SPDK_LIBRARIES -Wl,--whole-archive ${SpdkLibPrefix}bdev_nvme.a ${SpdkLibPref
+ 
+ include_directories(${AnnService})
+ include_directories(${Zstd}/lib)
+-include_directories(${Spdk}/include)
++# File-I/O (no-SPDK) build: SPDK is not compiled/linked. The SPDK headers are still
++# needed to parse ExtraSPDKController.h; point at the in-tree source headers and
++# define SPFRESH_NO_SPDK so the SPDK-only code paths are compiled out.
++include_directories(${PROJECT_SOURCE_DIR}/ThirdParty/spdk/include)
++add_definitions(-DSPFRESH_NO_SPDK)
+ 
+ file(GLOB_RECURSE HDR_FILES ${AnnService}/inc/Core/*.h  ${AnnService}/inc/Helper/*.h)
+ file(GLOB_RECURSE SRC_FILES ${AnnService}/src/Core/*.cpp ${AnnService}/src/Helper/*.cpp)
+@@ -63,9 +67,9 @@ if (TBB_FOUND)
+ endif()
+ 
+ add_library (SPTAGLib SHARED ${SRC_FILES} ${HDR_FILES})
+-target_link_libraries (SPTAGLib DistanceUtils ${RocksDB_LIBRARIES} ${uring_LIBRARIES} libzstd_shared ${NUMA_LIBRARY} tbb ${SPDK_LIBRARIES})
++target_link_libraries (SPTAGLib DistanceUtils ${RocksDB_LIBRARIES} ${uring_LIBRARIES} libzstd_shared ${NUMA_LIBRARY} tbb)
+ add_library (SPTAGLibStatic STATIC ${SRC_FILES} ${HDR_FILES})
+-target_link_libraries (SPTAGLibStatic DistanceUtils ${RocksDB_LIBRARIES} ${uring_LIBRARIES} libzstd_static ${NUMA_LIBRARY_STATIC} tbb ${SPDK_LIBRARIES})
++target_link_libraries (SPTAGLibStatic DistanceUtils ${RocksDB_LIBRARIES} ${uring_LIBRARIES} libzstd_static ${NUMA_LIBRARY_STATIC} tbb)
+ if(${CMAKE_CXX_COMPILER_ID} STREQUAL "GNU")
+     target_compile_options(SPTAGLibStatic PRIVATE -fPIC)
+ endif()
+diff --git a/AnnService/src/Core/SPANN/ExtraSPDKController.cpp b/AnnService/src/Core/SPANN/ExtraSPDKController.cpp
+index c689f28..e8bff10 100644
+--- a/AnnService/src/Core/SPANN/ExtraSPDKController.cpp
++++ b/AnnService/src/Core/SPANN/ExtraSPDKController.cpp
+@@ -11,6 +11,8 @@ int SPDKIO::BlockController::m_ssdInflight = 0;
+ int SPDKIO::BlockController::m_ioCompleteCount = 0;
+ std::unique_ptr<char[]> SPDKIO::BlockController::m_memBuffer;
+ 
++#ifndef SPFRESH_NO_SPDK
++
+ void SPDKIO::BlockController::SpdkBdevEventCallback(enum spdk_bdev_event_type type, struct spdk_bdev *bdev, void *event_ctx) {
+     fprintf(stderr, "SpdkBdevEventCallback: supported bdev event type %d\n", type);
+ }
+@@ -474,4 +476,104 @@ bool SPDKIO::BlockController::ShutDown() {
+     }
+ }
+ 
++#else // SPFRESH_NO_SPDK : file-I/O / RocksDB backend build (no real SPDK linked).
++// SPDKIO is never instantiated at runtime when m_useSPDK=false, but the
++// ExtraDynamicSearcher template still references these out-of-line symbols, so we
++// provide SPDK-free definitions. The in-memory implementation
++// (SPFRESH_SPDK_USE_MEM_IMPL=1) stays functional; the SSD/NVMe path is unavailable
++// without SPDK and returns false.
++
++bool SPDKIO::BlockController::Initialize(int batchSize) {
++    std::lock_guard<std::mutex> lock(m_initMutex);
++    m_numInitCalled++;
++    const char* useMemImplEnvStr = getenv(kUseMemImplEnv);
++    m_useMemImpl = useMemImplEnvStr && !strcmp(useMemImplEnvStr, "1");
++    if (m_useMemImpl) {
++        if (m_numInitCalled == 1) {
++            if (m_memBuffer == nullptr) {
++                m_memBuffer.reset(new char[kMemImplMaxNumBlocks * PageSize]);
++            }
++            for (AddressType i = 0; i < kMemImplMaxNumBlocks; i++) {
++                m_blockAddresses.push(i);
++            }
++        }
++        return true;
++    }
++    fprintf(stderr, "SPDKIO::BlockController::Initialize: built without SPDK (SPFRESH_NO_SPDK); SSD path unavailable\n");
++    return false;
++}
++
++bool SPDKIO::BlockController::GetBlocks(AddressType* p_data, int p_size) {
++    if (m_useMemImpl) {
++        AddressType currBlockAddress = 0;
++        for (int i = 0; i < p_size; i++) {
++            while (!m_blockAddresses.try_pop(currBlockAddress));
++            p_data[i] = currBlockAddress;
++        }
++        return true;
++    }
++    return false;
++}
++
++bool SPDKIO::BlockController::ReleaseBlocks(AddressType* p_data, int p_size) {
++    if (m_useMemImpl) {
++        for (int i = 0; i < p_size; i++) m_blockAddresses.push(p_data[i]);
++        return true;
++    }
++    return false;
++}
++
++bool SPDKIO::BlockController::ReadBlocks(AddressType* p_data, std::string* p_value, const std::chrono::microseconds &timeout) {
++    if (m_useMemImpl) {
++        p_value->resize(p_data[0]);
++        AddressType currOffset = 0;
++        AddressType dataIdx = 1;
++        while (currOffset < p_data[0]) {
++            AddressType readSize = (p_data[0] - currOffset) < PageSize ? (p_data[0] - currOffset) : PageSize;
++            memcpy(p_value->data() + currOffset, m_memBuffer.get() + p_data[dataIdx] * PageSize, readSize);
++            currOffset += PageSize;
++            dataIdx++;
++        }
++        return true;
++    }
++    return false;
++}
++
++bool SPDKIO::BlockController::ReadBlocks(std::vector<AddressType*>& p_data, std::vector<std::string>* p_values, const std::chrono::microseconds &timeout) {
++    if (m_useMemImpl) {
++        p_values->resize(p_data.size());
++        for (size_t i = 0; i < p_data.size(); i++) {
++            ReadBlocks(p_data[i], &((*p_values)[i]));
++        }
++        return true;
++    }
++    return false;
++}
++
++bool SPDKIO::BlockController::WriteBlocks(AddressType* p_data, int p_size, const std::string& p_value) {
++    if (m_useMemImpl) {
++        for (int i = 0; i < p_size; i++) {
++            memcpy(m_memBuffer.get() + p_data[i] * PageSize, p_value.data() + i * PageSize, PageSize);
++        }
++        return true;
++    }
++    return false;
++}
++
++bool SPDKIO::BlockController::IOStatistics() {
++    return true;
++}
++
++bool SPDKIO::BlockController::ShutDown() {
++    std::lock_guard<std::mutex> lock(m_initMutex);
++    m_numInitCalled--;
++    if (m_useMemImpl && m_numInitCalled == 0) {
++        AddressType currBlockAddress;
++        while (!m_blockAddresses.empty()) m_blockAddresses.try_pop(currBlockAddress);
++    }
++    return true;
++}
++
++#endif // SPFRESH_NO_SPDK
++
+ }
