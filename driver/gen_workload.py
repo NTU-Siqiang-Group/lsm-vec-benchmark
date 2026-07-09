@@ -278,6 +278,12 @@ def main():
                 diskann_gt(active_fbin, os.path.join(args.out, "query.fbin"),
                            gt_path, args.gt_K, args.gt_dtype, args.diskann_gt_bin,
                            active_ids)
+                # The active-set snapshot is only needed to compute this checkpoint's gt;
+                # delete it immediately so they don't accumulate (at 100M each is ~60GB).
+                try:
+                    os.remove(active_fbin)
+                except OSError:
+                    pass
             else:
                 ids, dists = brute_force_gt(all_ids_vecs[active_ids], active_ids,
                                             queries, args.gt_K)

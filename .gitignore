@@ -20,3 +20,14 @@ driver/spfresh_driver
 *.a
 __pycache__/
 *.pyc
+
+# --- documents: kept local, not in the benchmark repo (per user) ---
+docs/
+
+# --- ledger + conversation log: kept local (per user) ---
+PROGRESS.md
+chat_history.md
+
+# stray SPFresh artifact
+DeletedIDs.bin
+*.bin

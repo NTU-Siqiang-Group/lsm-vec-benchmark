@@ -6,7 +6,10 @@ fig/<name>.pdf. Names are `<family>__<ds>_<scale>_<ratio>`.
 
 # Matrix axes.
 DATASETS = ["sift", "spacev"]
-SCALES = ["1m", "10m", "100m"]
+# Completed cells: 1m, 10m. Larger scales are not reachable on this machine — see
+# docs/100m-feasibility-and-spfresh-scale.md: ours' in-memory bulk build OOMs above ~40M
+# (RNND peak ~2.5 GB/M vs 125 GB RAM), and SPFresh/SPANN+ file-I/O indices exceed the disk.
+SCALES = ["1m", "10m"]
 RATIOS = ["rins", "r9010"]
 
 # Systems we PLOT. DiskANN-IP (fully in-memory) is intentionally EXCLUDED: comparing on-disk methods
@@ -17,10 +20,14 @@ ALL_SYSTEMS = ["ours", "lsm-vec-no-sa", "lsm-vec-basic",
 
 
 def systems_for_scale(scale):
-    # At 1m: ours + the two ablations + the on-disk baselines. At 10m/100m: carry the core on-disk
-    # systems (DiskANN-merge is the on-disk DiskANN; the ablations are 1m-only unless run larger).
+    # At 1m: ours + the two ablations + the on-disk baselines. At 10m: core on-disk systems.
+    # At 50m/100m: only ours + diskann_merge — SPFresh/SPANN+ file-I/O indices exceed this
+    # machine's disk (~8 GB/M → 400-800 GB), so they are not run there (cite the SPFresh paper's
+    # own 100M numbers instead). See docs/100m-feasibility-and-spfresh-scale.md.
     if scale == "1m":
         return ALL_SYSTEMS
+    if scale in ("50m", "100m"):
+        return ["ours", "diskann_merge"]
     return ["ours", "spfresh", "spannplus", "diskann_merge"]
 
 
