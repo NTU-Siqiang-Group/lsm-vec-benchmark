@@ -71,6 +71,16 @@ def read_bvecs(path, count=None):
         return a[:, 4:].astype(np.float32)
 
 
+def read_i8bin(path, count=None):
+    """DiskANN .i8bin: int32 n, int32 d, then n*d int8 (SPACEV/MSSPACEV base+query)."""
+    with open(path, "rb") as f:
+        n, d = struct.unpack("ii", f.read(8))
+        if count is not None:
+            n = min(n, count)
+        a = np.fromfile(f, dtype=np.int8, count=n * d).reshape(n, d)
+        return a.astype(np.float32)
+
+
 def read_vectors(path, count=None):
     ext = os.path.splitext(path)[1].lower()
     if ext == ".fbin":
@@ -79,6 +89,8 @@ def read_vectors(path, count=None):
         return read_fvecs(path, count)
     if ext == ".bvecs":
         return read_bvecs(path, count)
+    if ext == ".i8bin":
+        return read_i8bin(path, count)
     raise ValueError(f"unknown vector file extension: {ext} ({path})")
 
 
