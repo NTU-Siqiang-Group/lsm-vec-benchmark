@@ -196,6 +196,9 @@ def main():
     ap.add_argument("--query-file", help="query vectors (.fvecs/.bvecs/.fbin)")
     ap.add_argument("--pool-frac", type=float, default=0.5,
                     help="pool size as a fraction of N (default 0.5)")
+    ap.add_argument("--max-queries", type=int, default=0,
+                    help="if >0 and the query file has more rows, deterministically "
+                         "subsample to this many queries (seeded; e.g. SPACEV 29316 -> 10000)")
     # synthetic
     ap.add_argument("--synthetic", action="store_true",
                     help="generate random vectors instead of reading a dataset")
@@ -234,6 +237,14 @@ def main():
         base = data[:N]
         pool = data[N:N + n_pool]          # disjoint tail
         queries = read_vectors(args.query_file)
+
+    # Optional deterministic query subsample (e.g. SPACEV ships 29,316; subsample to match
+    # SIFT's 10k for comparable latency/QPS and bounded runtime). Uses a dedicated RNG so the
+    # epoch ins/del stream is unaffected. The chosen indices are recorded in the manifest.
+    if args.max_queries and queries.shape[0] > args.max_queries:
+        qrng = np.random.default_rng(args.seed + 100003)
+        qsel = np.sort(qrng.choice(queries.shape[0], size=args.max_queries, replace=False))
+        queries = queries[qsel]
 
     base_ids = np.arange(0, N, dtype=np.uint32)
     pool_ids = np.arange(N, N + n_pool, dtype=np.uint32)
