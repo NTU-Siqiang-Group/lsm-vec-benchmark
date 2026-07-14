@@ -59,25 +59,28 @@ def stacked(kind, cell):
     fig, ax = style.new_fig()
     xs, labels = [], []
     for i, s in enumerate(systems):
-        d = last(s, cell, [c[0] for c in comps if c[0] != "__other__"])
+        r = rows(s, cell)
         xs.append(i)
         labels.append({"ours_section": "ours"}.get(s, s.replace("_", "\n")))
-        if d is None:
-            # baseline without breakdown -> single total bar (disk only)
-            if kind == "disk":
-                r = rows(s, cell)
-                tot = (r[-1].get("disk_mb", 0) if r else 0)
-                ax.bar(i, tot, color="#bbbbbb", edgecolor="black", linewidth=0.4)
+        if r is None:
+            continue
+        e = r[-1]
+        has_breakdown = e.get(comps[0][0]) is not None  # only ours emits disk_graph_mb / mem_* fields
+        if kind == "disk" and not has_breakdown:
+            tot = e.get("disk_mb", 0)                    # baseline: single total bar
+            ax.bar(i, tot, color="#bbbbbb", edgecolor="black", linewidth=0.4)
+            ax.text(i, tot, f"{tot/1000:.1f}G", ha="center", va="bottom", fontsize=7)
             continue
         bottom = 0.0
         for key, lbl, col in comps:
             if key == "__other__":
                 v = max(0.0, peak_rss(s, cell) - bottom)
             else:
-                v = d.get(key, 0.0)
+                v = e.get(key, 0.0) or 0.0
             ax.bar(i, v, bottom=bottom, color=col, edgecolor="black", linewidth=0.3,
                    label=lbl if i == 0 else None)
             bottom += v
+        ax.text(i, bottom, f"{bottom/1000:.1f}G", ha="center", va="bottom", fontsize=7)
     ax.set_xticks(xs)
     ax.set_xticklabels(labels, fontsize=8)
     ax.set_ylabel("disk (MB)" if kind == "disk" else "memory (MB)")

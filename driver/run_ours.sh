@@ -35,12 +35,15 @@ rm -rf "$DB"
 
 EXTRA=""
 [ -n "$BULK" ] && EXTRA="--bulk-build --build-threads $BUILD_THREADS"
+# EXTRA_ARGS: free-form passthrough for ablation/sweep flags (--sa-route-off, --layout, --sa-max-children,
+# --checkpoint-epochs/--query-sweep, ...). Appended verbatim.
+EXTRA_ARGS="${EXTRA_ARGS:-}"
 
-echo "[run_ours] name=$NAME cell=$CELL ef_final=$EF_FINAL hops=$HOPS qsub=$QSUB use_sa=$USE_SA layer_mult=$LAYER_MULT bulk=${BULK:-0} build_threads=$BUILD_THREADS"
+echo "[run_ours] name=$NAME cell=$CELL ef_final=$EF_FINAL hops=$HOPS qsub=$QSUB use_sa=$USE_SA layer_mult=$LAYER_MULT bulk=${BULK:-0} build_threads=$BUILD_THREADS extra_args='$EXTRA_ARGS'"
 "$BIN" --trace "$TRACE" --db "$DB" \
   --out  "$RAW/${NAME}_${CELL}.jsonl" \
   --mem  "$RAW/${NAME}_${CELL}.mem.jsonl" \
   --efs "$EFS" --ef-final "$EF_FINAL" --hops "$HOPS" --query-subsample "$QSUB" \
-  --use-sa "$USE_SA" --layer-mult "$LAYER_MULT" $EXTRA
+  --use-sa "$USE_SA" --layer-mult "$LAYER_MULT" $EXTRA $EXTRA_ARGS
 
 echo "[run_ours] done -> $RAW/${NAME}_${CELL}.jsonl (+ .mem.jsonl)"
