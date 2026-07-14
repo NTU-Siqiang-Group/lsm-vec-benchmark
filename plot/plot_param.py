@@ -79,6 +79,41 @@ def lines(cell):
         print(f"[param] {out}.pdf")
 
 
+def msweep(cell):
+    """Exp 3: graph out-degree M sweep. Panels: recall, P99, graph disk, insert throughput."""
+    import json
+    Ms = [8, 16, 32, 48]
+    data = {}
+    for M in Ms:
+        fp = f"{RAW}/ours_M{M}_{cell}.jsonl"
+        if not os.path.exists(fp):
+            continue
+        r = [json.loads(l) for l in open(fp) if l.strip()]
+        rc = [x["recall10"] for x in r if x.get("recall10") is not None]
+        ins = [x.get("ins_ops_s", 0) for x in r if x.get("ins_ops_s", 0) > 0]
+        data[M] = dict(recall=rc[-1], p99=sum(x.get("lat_p99_ms", 0) for x in r) / len(r),
+                       graph=r[-1].get("disk_graph_mb", 0),
+                       ins=sum(ins) / len(ins) if ins else 0)
+    xs = [M for M in Ms if M in data]
+    panels = [("recall", "recall@10"), ("p99", "P99 latency (ms)"),
+              ("graph", "graph disk (MB)"), ("ins", "insert (ops/s)")]
+    fig, axes = plt.subplots(1, 4, figsize=(9, 2.3))
+    for ax, (key, ylab) in zip(axes, panels):
+        ax.plot(range(len(xs)), [data[M][key] for M in xs], "-o", color="#0072b2")
+        ax.set_xticks(range(len(xs))); ax.set_xticklabels([str(M) for M in xs])
+        ax.set_xlabel("M (out-degree)"); ax.set_ylabel(ylab, fontsize=9)
+    fig.suptitle(f"Graph out-degree M sweep — {cell}", fontsize=10)
+    fig.tight_layout(rect=[0, 0, 1, 0.92])
+    out = f"{FIG}/param_M__{cell}"
+    style.save_fig(fig, out)
+    print(f"[param] {out}.pdf  " + " ".join(f"M{M}:r={data[M]['recall']:.3f}" for M in xs))
+
+
 if __name__ == "__main__":
     kind, cell = sys.argv[1], sys.argv[2]
-    heatmap(cell) if kind == "heatmap" else lines(cell)
+    if kind == "heatmap":
+        heatmap(cell)
+    elif kind == "msweep":
+        msweep(cell)
+    else:
+        lines(cell)
