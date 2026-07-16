@@ -45,12 +45,15 @@ bench.py            results orchestrator: aggregate raw JSONL -> canonical .dat 
 experiments.py      experiment registry: which (family, cell, systems) exist
 driver/
   gen_workload.py   generate a shared trace for one cell (base/pool/queries + per-epoch ops + gt)
-  run_ours.sh       drive OUR system (and the two ablations) over a trace
+  run_ours.sh       drive OUR system (and ablations/variants) over a trace  (§4; knobs in §5, §7)
   run_spfresh.sh    drive SPFresh / SPANN+ over a trace
   spfresh_driver.cpp  the SPFresh replay driver (compiled by run_spfresh.sh on first use)
   mem_sampler.py    external RSS sampler (wraps baseline processes; ours samples in-process)
   trace_format.md   on-disk trace format spec
-plot/               paper-style Matplotlib plotters (style, dat reader, timeseries/bar/pareto)
+  run_*.sh          per-experiment orchestrators (rebaselines, ablations, diagnostics,
+                    SPACEV mirror, DiskANN merge-regime variant) — catalogued in §7
+plot/               paper-style plotters: core families + additional/diagnostic plotters
+                    (ablation, breakdown, pareto_curve, param, exp1_routing, exp5_disk, exp2_memory) — §7
 patches/            local patches + new driver sources to apply to the submodules (see §3.1)
 LSM-Vec-with-SA-HNSW/  diskann/  diskann_merge_src/  spfresh/   ← submodules (systems under test)
 work/               generated traces + scratch DBs/indices  (gitignored — large)
@@ -203,3 +206,62 @@ the default in the harness); overlay is kept only for A/B.
   headers) → `results/fig/` (figures). Memory metrics use **workload-only** RSS (samples with
   `epoch ≥ 0`; the build phase is tagged `epoch = -1`).
 
+
+---
+
+## 7. Experiment runners, CLI knobs & plotters (additional + diagnostic experiments)
+
+Beyond the core cells (§4–§6), the study includes ablations, diagnostics, a full **SPACEV mirror**, and
+a **DiskANN merge-regime variant**. Each is driven by a `driver/run_*.sh` orchestrator (strictly serial;
+most are **resumable** — a variant whose raw JSONL already has 50 epochs is skipped). Findings for all of
+these live in the results repo's `RESULTS.md` (§10 ablations, §11 diagnostics, §12 SPACEV, §13 DiskANN
+flush).
+
+### 7.1 Runner scripts
+
+| script | what it runs | RESULTS |
+|---|---|---|
+| `rebaseline_1m_4tbuild.sh`, `rebaseline_10m.sh` | main cells, all systems, 4-thread build / 1-thread workload | §2–§3 |
+| `run_spacev_1m.sh`, `run_spacev_10m.sh` | main cells on SPACEV (all systems) | §4–§5 |
+| `run_ablation_sift_1m.sh` | SA-routing (D4) + layout (D5) ablation arms | §10.1–10.2 |
+| `run_phase467_sift_1m.sh` | disk/mem breakdown (D6/D7) + cache sweep + ef Pareto (D9) | §10.3–10.5 |
+| `run_phase8_param_200k.sh` | param sensitivity: top-H×beam, layer_mult, alpha, min-cluster | §10.6 |
+| `run_additional_sift_10m.sh` | 10M ablation + breakdown + Pareto (section-cap fix path) | §10.7 |
+| `run_exp5_baselines_sift_1m.sh` | regenerate baseline index dirs for the disk breakdown | §11.2 |
+| `run_spacev_200k_params.sh`, `run_spacev_1m_additional.sh`, `run_spacev_1m_baselines.sh`, `run_spacev_10m_additional.sh`, `run_spacev_mirror_chain.sh` | **SPACEV mirror** of every SIFT experiment (chain = 1M→baselines→10M) | §12 |
+| `run_diskann_flush.sh`, `run_diskann_flush_10m.sh` | **DiskANN `merge_every=100k`** variant (merges actually fire); the 10M runner is **disk-watchdog-guarded** (aborts <12 GB free) | §13 |
+
+Most runners drive `run_ours.sh` with `NAME=<variant>` and `EXTRA_ARGS="<flags>"`; look inside any
+script for the exact invocation.
+
+### 7.2 `run_ours.sh` passthrough & `bench_streaming` CLI knobs
+
+`run_ours.sh` forwards `EXTRA_ARGS` verbatim to `bench_streaming`, which exposes:
+
+- **Ablation / variant:** `--sa-route-off` (D4: build SA, skip routing at query = controlled `ours_no_sa`);
+  `--layout {section,append,random}` (D5: on-disk vector placement); `--no-sketch-only` (overlay A/B).
+- **Parameter sweeps:** `--m` / `--m-max` (graph out-degree); `--sa-max-children`, `--sa-beam`,
+  `--sa-rebuild-alpha`, `--sa-min-cluster` (D8); `--paged-cache-pages` (vector page cache);
+  `--hops` (= sketch depth top-H); `--layer-mult` (already a positional/env knob).
+- **Diagnostics:** `--checkpoint-epochs a,b,c --query-sweep e1,e2,...` (D9: query-only ef Pareto on the
+  live index → `<out>.sweep.jsonl`); `--trace-exp1 <epoch> --trace-queries N` (Exp 1: per-query visit
+  trace for the SA-routing case study); `--profile-insert` (insert-phase breakdown).
+- **Metrics added to the per-epoch JSONL:** `lat_p95_ms`; `query_page_miss_per_query` (physical vector
+  reads); `query_vec_read_ms` (vector-read wall time); `disk_{graph,vector,wal,meta}_mb` (D6);
+  `mem_{upper_hnsw,sa_sketch,graph_cache,vec_cache,update_buf}_mb` (D7).
+
+`bench_stream_merge` (DiskANN) adds `--merge_every` — **30M** = the paper default (never fires ≤14M live,
+the "below-threshold" regime); **100k** = the merge-regime variant in §13.
+
+### 7.3 Diagnostic plotters (`plot/`)
+
+Read raw JSONL directly (not via `bench.py`), one figure family each:
+
+- `plot_ablation.py {phase2|phase3} <cell>` — SA-routing / layout ablation bars.
+- `plot_breakdown.py {disk|mem|cache} <cell>` — disk & memory component stacks, cache sensitivity.
+- `plot_pareto_curve.py <name> <cell>` — recall-latency / recall-IO Pareto from a `.sweep.jsonl`.
+- `plot_param.py {heatmap|msweep|lines} <cell>` — top-H×beam heatmap, M sweep, layer/alpha/min-cluster.
+- `plot_exp1_routing.py <trace.jsonl> <trace_dir> <epoch> <tag>` — routing trajectory + target-hit
+  (computes dist-to-target offline from the trace vectors + gt).
+- `plot_exp5_disk.py <cell>` — per-system disk breakdown from the final index directories.
+- `plot_exp2_memory.py <cell>` — LSM-Vec memory composition over epochs + ours-vs-SPFresh RSS.
