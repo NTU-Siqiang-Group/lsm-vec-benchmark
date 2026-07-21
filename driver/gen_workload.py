@@ -59,8 +59,10 @@ def read_fvecs(path, count=None):
         return a[:, 1:].view(np.float32).astype(np.float32)
 
 
-def read_bvecs(path, count=None):
-    """.bvecs: per row int32 d, then d uint8 (SIFT/BIGANN base+query). At most `count` rows."""
+def read_bvecs(path, count=None, raw=False):
+    """.bvecs: per row int32 d, then d uint8 (SIFT/BIGANN base+query). At most `count` rows.
+    raw=True returns the uint8 view (no float copy) — required at 100M scale, where the
+    float32 conversion alone is ~77 GB; write_fbin converts chunkwise on write instead."""
     with open(path, "rb") as f:
         d = struct.unpack("i", f.read(4))[0]
         f.seek(0)
@@ -68,7 +70,8 @@ def read_bvecs(path, count=None):
         nbytes = count * row_bytes if count is not None else -1
         a = np.fromfile(f, dtype=np.uint8, count=nbytes)
         a = a.reshape(-1, row_bytes)
-        return a[:, 4:].astype(np.float32)
+        v = a[:, 4:]
+        return v if raw else v.astype(np.float32)
 
 
 def read_i8bin(path, count=None):
@@ -81,25 +84,28 @@ def read_i8bin(path, count=None):
         return a.astype(np.float32)
 
 
-def read_vectors(path, count=None):
+def read_vectors(path, count=None, raw=False):
     ext = os.path.splitext(path)[1].lower()
     if ext == ".fbin":
         return read_fbin(path, count)
     if ext == ".fvecs":
         return read_fvecs(path, count)
     if ext == ".bvecs":
-        return read_bvecs(path, count)
+        return read_bvecs(path, count, raw=raw)
     if ext == ".i8bin":
         return read_i8bin(path, count)
     raise ValueError(f"unknown vector file extension: {ext} ({path})")
 
 
-def write_fbin(path, arr):
-    arr = np.ascontiguousarray(arr, dtype=np.float32)
+def write_fbin(path, arr, chunk=1_000_000):
     n, d = arr.shape
     with open(path, "wb") as f:
         f.write(struct.pack("ii", n, d))
-        arr.tofile(f)
+        if arr.dtype == np.float32 and arr.flags.c_contiguous:
+            arr.tofile(f)
+        else:  # e.g. raw uint8 bvecs view at 100M — convert chunkwise, never a full copy
+            for i in range(0, n, chunk):
+                np.ascontiguousarray(arr[i:i + chunk], dtype=np.float32).tofile(f)
 
 
 def write_u32(path, ids):
@@ -206,6 +212,9 @@ def main():
     ap.add_argument("--n-queries", type=int, default=200, help="synthetic query count")
     # groundtruth
     ap.add_argument("--gt-method", choices=["bruteforce", "diskann"], default="bruteforce")
+    ap.add_argument("--low-mem", action="store_true",
+                    help="keep bvecs as uint8 in RAM (chunked float conversion on write); "
+                         "auto-enabled when N+pool > 30M")
     ap.add_argument("--diskann-gt-bin",
                     default="diskann/build/apps/utils/compute_groundtruth")
     ap.add_argument("--gt-dtype", default="float", help="DiskANN data_type for gt")
@@ -229,7 +238,13 @@ def main():
     else:
         if not args.base_file or not args.query_file:
             ap.error("--base-file and --query-file are required unless --synthetic")
-        data = read_vectors(args.base_file, count=N + n_pool)
+        # Low-mem path (auto >30M or --low-mem): keep bvecs as uint8 — the float32
+        # copy of 150M vectors is ~77 GB and OOMs the 125 GB box during 100M gen.
+        use_raw = (args.base_file.endswith(".bvecs")
+                   and (args.low_mem or N + n_pool > 30_000_000))
+        if use_raw and args.gt_method != "diskann":
+            ap.error("--low-mem / >30M bvecs requires --gt-method diskann")
+        data = read_vectors(args.base_file, count=N + n_pool, raw=use_raw)
         if data.shape[0] < N + n_pool:
             ap.error(f"dataset has {data.shape[0]} rows, need {N + n_pool} "
                      f"(base {N} + pool {n_pool})")
@@ -255,8 +270,12 @@ def main():
     write_u32(os.path.join(args.out, "pool.ids.u32"), pool_ids)
     write_fbin(os.path.join(args.out, "query.fbin"), queries)
 
-    # id -> vector for gt materialization (concatenated base+pool space)
-    all_ids_vecs = np.concatenate([base, pool], axis=0)  # row r -> global id r
+    # id -> vector for gt materialization (row r -> global id r). base/pool are
+    # slices of one contiguous load — reuse it, never concatenate a second copy.
+    if args.synthetic:
+        all_ids_vecs = all_vecs
+    else:
+        all_ids_vecs = data[:N + n_pool]
 
     ops = max(1, N // 100)  # 1% of N
     if args.ratio == "rins":

@@ -1,5 +1,5 @@
 #!/bin/bash
-# DiskANN flush 10M cells, disk-guarded. Aborts the run if free disk < 12GB (DiskANN 10M merges
+# DiskANN flush 10M cells, disk-guarded. Aborts the run if free disk < 8GB (DiskANN 10M merges
 # need ~48GB transient temp; a watchdog prevents a disk-full crash mid-workload).
 set -u
 cd /home/dmo/lsm_vec_benchmark
@@ -20,8 +20,8 @@ run_one(){
   # watchdog: kill if free disk drops below 12GB
   while kill -0 $pid 2>/dev/null; do
     local free_kb=$(df --output=avail /home/dmo | tail -1)
-    if [ "$free_kb" -lt 12582912 ]; then
-      echo "[$(ts)] ABORT $cell: free disk < 12GB, killing to avoid crash"
+    if [ "$free_kb" -lt 8388608 ]; then
+      echo "[$(ts)] ABORT $cell: free disk < 8GB, killing to avoid crash"
       kill -9 $pid 2>/dev/null; rm -rf ${idx}*
       return 1
     fi
