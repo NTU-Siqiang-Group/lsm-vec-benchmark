@@ -28,7 +28,15 @@ ROOT=/home/dmo/lsm_vec_benchmark
 SPF=$ROOT/spfresh/Release
 DRV=$ROOT/driver
 SRC=$DRV/spfresh_driver.cpp
-BIN=$DRV/spfresh_driver
+# VALUE_TYPE: Float (V2 default, reads *.fbin) | UInt8 (SIFT native, *.u8bin) | Int8 (SPACEV native, *.i8bin).
+# PVLDB revision Step 1 runs the baselines on the dataset's native byte type.
+VALUE_TYPE="${VALUE_TYPE:-Float}"
+case "$VALUE_TYPE" in
+  Float) VEXT=fbin;  VDEF="";                BIN=$DRV/spfresh_driver ;;
+  UInt8) VEXT=u8bin; VDEF="-DSPF_VT_UINT8";  BIN=$DRV/spfresh_driver_u8 ;;
+  Int8)  VEXT=i8bin; VDEF="-DSPF_VT_INT8";   BIN=$DRV/spfresh_driver_i8 ;;
+  *) echo "bad VALUE_TYPE=$VALUE_TYPE"; exit 2 ;;
+esac
 
 TRACE=${1:?usage: run_spfresh.sh <trace_dir> [spfresh|spannplus] [ef]}
 TRACE=$(readlink -f "$TRACE")
@@ -84,7 +92,7 @@ if [ ! -x "$BIN" ] || [ "$SRC" -nt "$BIN" ]; then
   /usr/bin/g++-9 -std=c++17 -O3 -march=native -fopenmp -w \
     -DBOOST_ALL_NO_LIB -DBOOST_ATOMIC_DYN_LINK -DBOOST_FILESYSTEM_DYN_LINK \
     -DBOOST_REGEX_DYN_LINK -DBOOST_SERIALIZATION_DYN_LINK -DBOOST_SYSTEM_DYN_LINK \
-    -DBOOST_THREAD_DYN_LINK -DBOOST_WSERIALIZATION_DYN_LINK -DROCKSDB -DSPFRESH_NO_SPDK \
+    -DBOOST_THREAD_DYN_LINK -DBOOST_WSERIALIZATION_DYN_LINK -DROCKSDB -DSPFRESH_NO_SPDK $VDEF \
     -I$ROOT/spfresh/AnnService -I$ROOT/spfresh/ThirdParty/zstd/lib \
     -I$ROOT/spfresh/ThirdParty/spdk/include -isystem /home/dmo/SPFresh/rocksdb/_install/include \
     "$SRC" -o "$BIN" \
@@ -102,14 +110,14 @@ fi
 # ---- build ini (DEFAULT vector format == our .fbin for float) ----
 cat > "$WORK/build.ini" <<EOF
 [Base]
-ValueType=Float
+ValueType=$VALUE_TYPE
 DistCalcMethod=L2
 IndexAlgoType=BKT
 Dim=$DIM
-VectorPath=$TRACE/base.fbin
+VectorPath=$TRACE/base.$VEXT
 VectorType=DEFAULT
 VectorSize=$NBASE
-QueryPath=$TRACE/query.fbin
+QueryPath=$TRACE/query.$VEXT
 QueryType=DEFAULT
 GenerateTruth=false
 IndexDirectory=$ST
@@ -171,10 +179,10 @@ EOF
 cat > "$ST/indexloader.ini" <<EOF
 [Index]
 IndexAlgoType=SPANN
-ValueType=Float
+ValueType=$VALUE_TYPE
 
 [Base]
-ValueType=Float
+ValueType=$VALUE_TYPE
 DistCalcMethod=L2
 IndexAlgoType=BKT
 Dim=$DIM
@@ -227,9 +235,12 @@ grep -i "posting num:" "$WORK/build.log" | tail -1 || true
 
 # ---- phase 2: replay our trace (wrapped by mem_sampler, epoch tagged by driver) ----
 echo "[run] replaying trace..."
+# CC_ARGS: concurrent-workload passthrough (plan §1). Set CC_ARGS="--concurrent [--concurrent-rate R]".
+CC_ARGS="${CC_ARGS:-}"
+SWEEP_ARGS="${SWEEP_ARGS:-}"
 python3 "$DRV/mem_sampler.py" --out "$WORK/run.mem.jsonl" --epoch-file "$EPOCHF" --dt 1.0 \
   -- "$BIN" --store "$ST" --trace "$TRACE" --out "$OUT" \
-     --dim "$DIM" --epochs "$NEPOCHS" --k 10 --ef "$EF" --epoch-file "$EPOCHF" \
+     --dim "$DIM" --epochs "$NEPOCHS" --k 10 --ef "$EF" --epoch-file "$EPOCHF" $CC_ARGS $SWEEP_ARGS \
   > "$WORK/run.log" 2>&1
 
 # ---- merge the two mem streams into the final continuous .mem.jsonl ----
