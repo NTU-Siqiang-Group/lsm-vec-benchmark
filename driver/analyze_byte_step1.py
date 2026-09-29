@@ -137,7 +137,8 @@ if __name__ == '__main__':
     MBD = os.path.join(RAW, '..', 'v2_tuned', 'membudget')
     all_res = {}
     for cell in ('sift_1m_r9010', 'spacev_1m_r9010', 'sift_10m_r9010'):
-        systems = [('ours_efc20 (V2.1)', 'ours_efc20', RAW), ('ours_v2 (V2.1)', 'ours_v2', RAW),
+        systems = [('ours_efc20_v3', 'ours_efc20_v3', RAW),
+                   ('ours_efc20 (V2.1)', 'ours_efc20', RAW), ('ours_v2 (V2.1)', 'ours_v2', RAW),
                    ('spfresh float32 (V2.1)', 'spfresh_v2', RAW), ('spfresh byte', 'spfresh_byte', RAW),
                    ('diskann float32 (V2.1)', 'diskann_flush_v2', RAW),
                    ('diskann byte', 'diskann_flush_byte', RAW)]
@@ -145,9 +146,10 @@ if __name__ == '__main__':
             print(f'\n#### {cell}\n')
         all_res[cell] = table(cell, systems)
         print()
-    print('=== ratios baseline / ours_efc20 (mean over stream; final in parentheses) ===')
-    for cell, r in all_res.items():
-        o = r.get('ours_efc20 (V2.1)')
+    for ref in ('ours_efc20 (V2.1)', 'ours_efc20_v3'):
+      print(f'=== ratios baseline / {ref} (mean over stream; final in parentheses) ===')
+      for cell, r in all_res.items():
+        o = r.get(ref)
         for lbl in ('spfresh float32 (V2.1)', 'spfresh byte', 'diskann float32 (V2.1)', 'diskann byte'):
             b = r.get(lbl)
             if not o or not b:
@@ -158,7 +160,7 @@ if __name__ == '__main__':
             print(f'{cell:16} {lbl:24} total {f(t[0],1)}x ({f(t[1],1)}x) | disk {f(d[0],1)}x ({f(d[1],1)}x)'
                   f' | RssAnon {f(a[0],1)}x ({f(a[1],1)}x)')
     print('\n=== memory-cap legs (sift_1m) ===')
-    for name in ('ours_efc20', 'ours_v2', 'spfresh_v2', 'spfresh_byte', 'diskann_flush_v2', 'diskann_flush_byte'):
+    for name in ('ours_efc20_v3', 'ours_efc20', 'ours_v2', 'spfresh_v2', 'spfresh_byte', 'diskann_flush_v2', 'diskann_flush_byte'):
         for tag in ('4g', '2g'):
             ep = [r for r in rows(os.path.join(MBD, f'{name}_mb{tag}_sift_1m_r9010.jsonl'))
                   if r.get('epoch', -1) >= 0 and 'lat_mean_ms' in r]
