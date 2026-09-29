@@ -1,5 +1,5 @@
 // lsm_inspect: footprint attribution for an LSM-Vec graph DB (PVLDB revision, footprint study).
-// Usage: lsm_inspect <db_dir>   (run after the benchmark process has exited)
+// Usage: lsm_inspect <db_dir> [varint]   (run after the benchmark process has exited)
 // Prints on-disk file classes (SST / WAL / other) before opening, then per-CF LSM properties and,
 // for the adjacency CF, live value bytes split into header / out-edges / in-edges.
 #include <cstdio>
@@ -24,7 +24,8 @@ int main(int argc, char** argv) {
   printf("files: sst=%.1fMB wal=%.1fMB (%d files) other=%.1fMB\n", sst / 1e6, wal / 1e6, nwal, other / 1e6);
 
   Options opts; opts.create_if_missing = false;
-  RocksGraph g(opts, EDGE_UPDATE_EAGER, ENCODING_TYPE_NONE, /*reinit=*/false, dir);
+  const bool varint = argc > 2 && std::string(argv[2]) == "varint";
+  RocksGraph g(opts, EDGE_UPDATE_EAGER, varint ? ENCODING_TYPE_VARINT : ENCODING_TYPE_NONE, /*reinit=*/false, dir);
   DB* db = g.get_raw_db();
   std::vector<std::string> cfs;
   DB::ListColumnFamilies(DBOptions(), dir, &cfs);
@@ -53,7 +54,10 @@ int main(int argc, char** argv) {
     auto v = it->value(); if (v.size() < 8) continue;
     uint32_t o = *reinterpret_cast<const uint32_t*>(v.data());
     uint32_t i = *reinterpret_cast<const uint32_t*>(v.data() + 4);
-    n++; keyb += it->key().size(); hdr += 8; outb += 8ull * o; inb += 8ull * i;
+    // payload bytes split by edge count (exact for fixed 8-byte ids; proportional for varint)
+    const uint64_t pay = v.size() - 8, tot = uint64_t(o) + i;
+    const uint64_t ob = tot ? pay * o / tot : 0;
+    n++; keyb += it->key().size(); hdr += 8; outb += ob; inb += pay - ob;
     outn += o; inn += i; if (i > maxin) maxin = i;
   }
   delete it;
