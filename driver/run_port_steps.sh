@@ -15,8 +15,11 @@ for spec in "$@"; do
   echo "[$(ts)] START $name $cell ($bin $extra)"
   rm -rf $db
   python3 driver/cache_sampler.py --dir $db --out $OUTD/${name}_${cell}.cache.jsonl --interval 20 >/dev/null 2>&1 & sp=$!
+  # defaults; a key given in the leg's extra args overrides its default (argval takes the first match)
+  defs=""; for kv in "--efs 64" "--ef-final 100" "--use-sa 1" "--layer-mult 0.125"; do
+    [[ " $extra " == *" ${kv%% *} "* ]] || defs="$defs $kv"; done
   work/bin/bench_$bin --trace work/$cell --db $db --out $out --mem $OUTD/${name}_${cell}.mem.jsonl \
-    --efs 64 --ef-final 100 --hops 4 --query-subsample 0 --use-sa 1 --layer-mult 0.125 \
+    $defs --hops 4 --query-subsample 0 \
     --bulk-build --build-threads 4 --efc ${efc} --mmap-vectors --max-epochs $ep $extra > $LOGD/${name}_${cell}.log 2>&1
   echo "[$(ts)] $name $cell rc=$?"; kill $sp 2>/dev/null
   enc=""; [[ " $extra " =~ --graph-(varint|lean) ]] && enc=varint
