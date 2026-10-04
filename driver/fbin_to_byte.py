@@ -9,20 +9,27 @@ Usage: fbin_to_byte.py <trace_dir> <uint8|int8>
 import sys, os, struct
 import numpy as np
 
-def convert(src, dst, dtype):
+def convert(src, dst, dtype, chunk_rows=4_000_000):
+    """Chunked (memory-mapped) so 100M-scale files never load whole; output identical to a one-shot pass."""
     with open(src, 'rb') as f:
         n, d = struct.unpack('ii', f.read(8))
-        a = np.fromfile(f, dtype=np.float32, count=n * d)
+    a = np.memmap(src, dtype=np.float32, mode='r', offset=8, shape=(n, d))
     info = np.iinfo(dtype)
-    if not np.all(a == np.round(a)):
-        sys.exit(f'FATAL {src}: non-integral values, byte conversion would be lossy')
-    if a.min() < info.min or a.max() > info.max:
-        sys.exit(f'FATAL {src}: range [{a.min()},{a.max()}] exceeds {dtype.__name__}')
-    b = a.astype(dtype)
-    with open(dst, 'wb') as f:
+    lo, hi = np.inf, -np.inf
+    with open(dst + '.tmp', 'wb') as f:
         f.write(struct.pack('ii', n, d))
-        b.tofile(f)
-    print(f'{os.path.basename(dst)}: n={n} d={d} range=[{int(a.min())},{int(a.max())}] exact')
+        for s0 in range(0, n, chunk_rows):
+            c = np.asarray(a[s0:s0 + chunk_rows])
+            if not np.all(c == np.round(c)):
+                os.remove(dst + '.tmp')
+                sys.exit(f'FATAL {src}: non-integral values (rows {s0}..), byte conversion would be lossy')
+            lo, hi = min(lo, float(c.min())), max(hi, float(c.max()))
+            if lo < info.min or hi > info.max:
+                os.remove(dst + '.tmp')
+                sys.exit(f'FATAL {src}: range [{lo},{hi}] exceeds {dtype.__name__}')
+            c.astype(dtype).tofile(f)
+    os.replace(dst + '.tmp', dst)
+    print(f'{os.path.basename(dst)}: n={n} d={d} range=[{int(lo)},{int(hi)}] exact')
 
 trace, kind = sys.argv[1], sys.argv[2]
 dtype, ext = {'uint8': (np.uint8, 'u8bin'), 'int8': (np.int8, 'i8bin')}[kind]
