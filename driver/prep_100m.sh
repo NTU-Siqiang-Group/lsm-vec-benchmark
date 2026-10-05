@@ -44,7 +44,8 @@ for i in random.Random(1).sample(range(10_000_000), 20000)+list(range(1000)):
     assert (raw[i]==b10[i]).all(), ('base', i)
 for i in random.Random(2).sample(range(5_000_000), 20000):
     assert (raw[10_000_000+i]==p10[i]).all(), ('pool', i)
-assert (q[:len(q10)]==q10).all(), 'query'
+qs={q[i].tobytes() for i in range(len(q))}
+assert all(q10[j].astype(np.int8).tobytes() in qs for j in range(len(q10))), 'query subset'  # gen picks a seeded subset
 print('prefix + query verified')
 PY
   touch $RAWD/verify.ok
@@ -58,5 +59,6 @@ if [ ! -f work/spacev_100m_r9010/manifest.json ]; then
     --n-epochs 50 --gt-interval 10 --seed 1 --gt-method diskann \
     --out work/spacev_100m_r9010 > $LOGD/gen_spacev_100m.log 2>&1 || { echo FAIL gen; exit 1; }
 fi
+cmp work/spacev_100m_r9010/query.fbin work/spacev_10m_r9010/query.fbin || { echo "FAIL query mismatch vs spacev_10m"; exit 1; }
 [ -f work/spacev_100m_r9010/query.i8bin ] || python3 driver/fbin_to_byte.py work/spacev_100m_r9010 int8 > $LOGD/spacev_byte.log 2>&1
 echo "[$(ts)] PREP 100M DONE"
