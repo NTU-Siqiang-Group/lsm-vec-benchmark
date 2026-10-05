@@ -6,7 +6,8 @@ sys.path.insert(0, os.path.dirname(__file__))
 from analyze_byte_step1 import rows, per_epoch_cache, per_epoch_anon
 RAW = 'results/raw'
 CELLS = ['sift_1m_r9010', 'spacev_1m_r9010', 'sift_10m_r9010', 'spacev_10m_r9010', 'sift_100m_r9010', 'spacev_100m_r9010']
-SYS = [('ours_b8r256', 'ours_b8r256'), ('ours v3 (SQ8, ratio 3000, efc20, ef100)', 'ours_efc20_v3'),
+SYS = [('ours_b8r256c', 'ours_b8r256c'), ('ours_b8r256 (pre-compact sketch)', 'ours_b8r256'),
+       ('ours v3 (SQ8, ratio 3000, efc20, ef100)', 'ours_efc20_v3'),
        ('SPFresh-byte', 'spfresh_byte'), ('DiskANN-byte', 'diskann_flush_byte')]
 
 def stats(name, cell):
@@ -24,7 +25,7 @@ def stats(name, cell):
 
 for cell in CELLS:
     S = {lbl: stats(n, cell) for lbl, n in SYS}
-    if not S['ours_b8r256']: continue
+    if not S['ours_b8r256c']: continue
     print(f'\n**{cell}**\n')
     print('| system | recall mean (e0→e49) | lat ms | P99 ms | ins/s | RssAnon MB | page cache MB | total MB | disk MB | write KB/ins |')
     print('|---|---|---|---|---|---|---|---|---|---|')
@@ -32,7 +33,7 @@ for cell in CELLS:
         if not d: continue
         print(f"| {lbl} | {d['rec']:.3f} ({d['r0']:.3f}→{d['r49']:.3f}) | {d['lat']:.2f} | {d['p99']:.2f} | {d['ins']:,.0f} | "
               f"{d['anon']:,.0f} | {d['cache']:,.0f} | {d['total']:,.0f} | {d['disk']:,.0f} | {d['wkb']:.1f} |")
-    o = S['ours_b8r256']
+    o = S['ours_b8r256c']
     for lbl in ('SPFresh-byte', 'DiskANN-byte'):
         b = S[lbl]
         if not b: continue
