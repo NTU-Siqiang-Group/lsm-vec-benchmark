@@ -153,6 +153,18 @@ static double rssAnonMb() {
     return 0.0;
 }
 
+// Write back and drop the OS page cache of every regular file under `dir` (R1-D3 cold-cache protocol).
+static void dropOsCache(const std::string& dir) {
+    std::error_code ec;
+    for (auto it = std::filesystem::recursive_directory_iterator(dir, ec);
+         !ec && it != std::filesystem::recursive_directory_iterator(); it.increment(ec)) {
+        if (!it->is_regular_file(ec)) continue;
+        int fd = ::open(it->path().c_str(), O_RDONLY);
+        if (fd < 0) continue;
+        ::fdatasync(fd); ::posix_fadvise(fd, 0, 0, POSIX_FADV_DONTNEED); ::close(fd);
+    }
+}
+
 int main(int argc, char** argv) {
     std::string store = argval(argc, argv, "--store");
     std::string trace = argval(argc, argv, "--trace");
@@ -259,6 +271,9 @@ int main(int argc, char** argv) {
     // timeline. --concurrent-rate R>0 throttles the writer to R ops/s (Mode B). ----
     bool ccMode = false;
     for (int i = 1; i < argc; ++i) if (!strcmp(argv[i], "--concurrent")) ccMode = true;
+    bool coldQueries = false; int warmupQueries = 0;
+    for (int i = 1; i < argc; ++i) if (!strcmp(argv[i], "--cold-queries")) coldQueries = true;
+    { std::string w = argval(argc, argv, "--warmup-queries"); if (!w.empty()) warmupQueries = std::stoi(w); }
     double ccRate = atof(argval(argc, argv, "--concurrent-rate", "0").c_str());
     if (ccMode) {
         const int WB = 100, QB = 100;
@@ -398,6 +413,20 @@ int main(int argc, char** argv) {
         liveN += insDone - delDone;
 
         setEpoch(e);  // tag mem sampler for the (clean) query phase
+        // R1-D3 cache protocol (--cold-queries / --warmup-queries N): drop SPFresh's RocksDB block cache and the
+        // OS page cache of its store, then warm with N pool vectors (never the evaluation queries).
+        if (coldQueries) {
+            index->GetDiskIndex()->DropCaches();
+            dropOsCache(kvPath);
+        }
+        for (int w = 0; w < warmupQueries && pmap && pn > 0; ++w) {
+            const size_t row = (static_cast<uint64_t>(w) * 2654435761ull) % static_cast<uint64_t>(pn);
+            QueryResult wr(reinterpret_cast<const VT*>(&pmap[row * pd]), ef, false);
+            wr.Reset();
+            SPANN::SearchStats wst;
+            index->GetMemoryIndex()->SearchIndex(wr);
+            index->SearchDiskIndex(wr, &wst);
+        }
 
         // ---- query phase: full query set, single thread, per-query latency ----
         std::vector<std::vector<int64_t>> resGids(qn);
