@@ -234,6 +234,22 @@ flush).
 Most runners drive `run_ours.sh` with `NAME=<variant>` and `EXTRA_ARGS="<flags>"`; look inside any
 script for the exact invocation.
 
+**PVLDB revision (2026-09/10; RESULTS §17–§28) — current main comparison = native byte types:**
+
+| script | what it runs | RESULTS |
+|---|---|---|
+| `run_byte_step1.sh` (+ `fbin_to_byte.py`, chunked) | SPFresh / FreshDiskANN in native uint8/int8 (+ memory caps) | §17 |
+| `run_footprint_study.sh` (+ `tools/lsm_inspect`) | where ours' disk/memory goes: WAL cap, out-edges only | §18 |
+| `run_e4_layout.sh` | coupled vs decoupled node layout (read-only / update-only / mixed) | §19 |
+| `run_port_steps.sh` | dev legs with frozen per-step binaries (`work/bin/bench_*`): AsterVec port, efc / SQ8-vs-float / layout / sa_layer_mult studies; leg args `+`-separated | §20–§24 |
+| `run_v3_matrix.sh`, `run_v4_matrix.sh` | ours_efc20_v3 (SQ8) and ours_efc20_f32r256 (float32, supplementary) matrices | §20, §25 |
+| `run_phase_c.sh`, `run_phase_c2.sh` | **byte main matrix**: ours_b8r256(c) 1M/10M/100M + missing byte baselines | §26–§28 |
+| `prep_100m.sh` | SIFT 100M u8 copies; SPACEV1B first-150M range download + verification + trace/GT | §28 |
+| `run_diskann100m.sh` | FreshDiskANN-byte 100M (`--M_gb 100`, 115 GB cgroup cap, cleanup of dead StreamingMerge temp files) | §28 |
+| `run_ef100m.sh` | 100M ef_final 64/128/256 at every epoch (one run per dataset) | §28 |
+
+Analysis: `analyze_byte_step1.py`, `analyze_footprint.py`, `analyze_e4.py`, `analyze_v4.py`, `analyze_phase_c.py`.
+
 ### 7.2 `run_ours.sh` passthrough & `bench_streaming` CLI knobs
 
 `run_ours.sh` forwards `EXTRA_ARGS` verbatim to `bench_streaming`, which exposes:
@@ -246,6 +262,12 @@ script for the exact invocation.
 - **Diagnostics:** `--checkpoint-epochs a,b,c --query-sweep e1,e2,...` (D9: query-only ef Pareto on the
   live index → `<out>.sweep.jsonl`); `--trace-exp1 <epoch> --trace-queries N` (Exp 1: per-query visit
   trace for the SA-routing case study); `--profile-insert` (insert-phase breakdown).
+- **PVLDB-revision flags (LSM-Vec ≥ `1b31829`; defaults keep V2.1 behaviour):** `--graph-lean` (= Aster minimal mode
+  `--graph-out-only` + `--graph-skip-props` + `--graph-varint` + `--graph-batch-link`); `--max-total-wal-mb N`;
+  `--vec-raw8 u8|i8` (native byte vector records) / `--vec-float32` (raw float32 records); `--efc N`, `--ef-final N`;
+  `--coupled`, `--e4-metrics`, `--workload mixed|readonly|updateonly`, `--readonly-passes N` (E4); `--layout-diag`
+  (section / same-page locality at end of build); `--sharded-build K` (100M build). Current main config:
+  `--graph-lean --vec-raw8 u8|i8 --layer-mult 0.18034 --efc 12 --ef-final 64 --bulk-build --build-threads 4 --mmap-vectors`.
 - **Metrics added to the per-epoch JSONL:** `lat_p95_ms`; `query_page_miss_per_query` (physical vector
   reads); `query_vec_read_ms` (vector-read wall time); `disk_{graph,vector,wal,meta}_mb` (D6);
   `mem_{upper_hnsw,sa_sketch,graph_cache,vec_cache,update_buf}_mb` (D7).
