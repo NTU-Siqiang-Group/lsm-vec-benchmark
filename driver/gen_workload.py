@@ -191,7 +191,11 @@ def main():
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--dataset", default="synthetic")
     ap.add_argument("--scale", type=int, required=True, help="N = base index size")
-    ap.add_argument("--ratio", choices=["rins", "r9010"], required=True)
+    ap.add_argument("--ratio", choices=["rins", "r9010", "custom"], required=True)
+    ap.add_argument("--ins-frac", type=float, default=None,
+                    help="custom: inserts per epoch as a fraction of ops (ops = 1%% of N), e.g. 0.9")
+    ap.add_argument("--del-frac", type=float, default=None,
+                    help="custom: deletes per epoch as a fraction of ops, e.g. 0.1 (0.1%% of N) or 0.5")
     ap.add_argument("--n-epochs", type=int, default=50)
     ap.add_argument("--gt-interval", type=int, default=10)
     ap.add_argument("--seed", type=int, default=1)
@@ -278,7 +282,10 @@ def main():
         all_ids_vecs = data[:N + n_pool]
 
     ops = max(1, N // 100)  # 1% of N
-    if args.ratio == "rins":
+    if args.ratio == "custom":  # diagnostics (2026-10-14): insert-only / delete-only variants
+        ins_per = int(round((args.ins_frac or 0.0) * ops))
+        del_per = int(round((args.del_frac or 0.0) * ops))
+    elif args.ratio == "rins":
         ins_per, del_per = ops, 0
     else:  # r9010
         ins_per = max(1, int(round(0.9 * ops)))

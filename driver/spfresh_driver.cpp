@@ -37,6 +37,23 @@
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <unistd.h>
+#include <sys/resource.h>
+
+// Diagnostics (2026-10-14, Q3.2/Q3.3): BENCH_PHASE_LOG=<file> phase marks; BENCH_SYNC_INSERT=1 -> sync() inside the
+// insert window (after AllFinished, before the clock stops); process CPU seconds of the insert window.
+static void phaseMark(int epoch, const char* phase) {
+    static const char* path = getenv("BENCH_PHASE_LOG");
+    if (!path || !*path) return;
+    FILE* f = fopen(path, "a"); if (!f) return;
+    long long ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+    fprintf(f, "%lld %d %s\n", ms, epoch, phase); fclose(f);
+}
+static bool syncInsertWindow() { static const char* v = getenv("BENCH_SYNC_INSERT"); return v && *v == '1'; }
+static double processCpuSec() {
+    struct rusage ru; getrusage(RUSAGE_SELF, &ru);
+    return ru.ru_utime.tv_sec + ru.ru_stime.tv_sec + 1e-6 * (ru.ru_utime.tv_usec + ru.ru_stime.tv_usec);
+}
 
 #include "inc/Core/Common.h"
 #include "inc/Core/VectorIndex.h"
@@ -375,6 +392,7 @@ int main(int argc, char** argv) {
         // ---- deletes ----
         snprintf(buf, sizeof buf, "/epoch_%03d.del.u32", e);
         std::vector<uint32_t> dels = readU32(trace + buf);
+        phaseMark(e, "del_begin");
         double t0 = nowMs();
         long long delDone = 0;
         for (uint32_t g : dels) {
@@ -391,6 +409,8 @@ int main(int argc, char** argv) {
         std::vector<uint32_t> inss = readU32(trace + buf);
         unsigned long long ir0, iw0;
         procIO(ir0, iw0);
+        phaseMark(e, "ins_begin");
+        const double cpu0 = processCpuSec();
         t0 = nowMs();
         long long insDone = 0;
         for (uint32_t g : inss) {
@@ -404,7 +424,10 @@ int main(int argc, char** argv) {
             gid2vid[g] = vid; vid2gid[vid] = g; isLive[g] = 1; insDone++;
         }
         while (!index->AllFinished()) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        if (syncInsertWindow()) sync();
         double tIns = nowMs() - t0;
+        const double insCpu = processCpuSec() - cpu0;
+        phaseMark(e, "ins_end");
         unsigned long long ir1, iw1;
         procIO(ir1, iw1);
         double insRdKb = insDone > 0 ? (ir1 - ir0) / 1024.0 / insDone : 0.0;
@@ -433,6 +456,7 @@ int main(int argc, char** argv) {
         std::vector<double> lat(qn);
         unsigned long long qr0, qw0;
         procIO(qr0, qw0);
+        phaseMark(e, "query_begin");
         double q0 = nowMs();
         for (int i = 0; i < qn; ++i) {
             QueryResult res(&qdata[(size_t)i * qd], ef, false);
@@ -467,6 +491,7 @@ int main(int argc, char** argv) {
             }
         }
         double qWall = (nowMs() - q0) / 1000.0;
+        phaseMark(e, "query_end");
         double qps = qWall > 0 ? qn / qWall : 0.0;
         unsigned long long qr1, qw1;
         procIO(qr1, qw1);
@@ -516,9 +541,10 @@ int main(int argc, char** argv) {
             "\"lat_mean_ms\":%.4f,\"lat_p50_ms\":%.4f,\"lat_p99_ms\":%.4f,"
             "\"ins_ops_s\":%.2f,\"del_ops_s\":%.2f,\"rss_mb\":%.2f,\"disk_mb\":%.2f,"
             "\"ins_read_kb_per_op\":%.2f,\"ins_write_kb_per_op\":%.2f,"
-            "\"query_read_kb_per_q\":%.2f,\"rss_anon_mb\":%.2f,\"query_io_per_query\":0}\n",
+            "\"query_read_kb_per_q\":%.2f,\"rss_anon_mb\":%.2f,\"query_io_per_query\":0,"
+            "\"ins_cpu_s\":%.3f,\"ins_wall_s\":%.3f}\n",
             e, liveN, recallStr.c_str(), qps, mean, p50, p99,
-            insOps, delOps, rssMb(), dirMb(kvPath), insRdKb, insWrKb, qryRdKb, rssAnonMb());
+            insOps, delOps, rssMb(), dirMb(kvPath), insRdKb, insWrKb, qryRdKb, rssAnonMb(), insCpu, tIns / 1000.0);
         jsonl << line; jsonl.flush();
         fprintf(stderr, "[driver] epoch %d live_n=%lld ins=%lld del=%lld recall=%s qps=%.1f p50=%.3fms p99=%.3fms\n",
                 e, liveN, insDone, delDone, recallStr.c_str(), qps, p50, p99);
