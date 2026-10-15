@@ -159,6 +159,11 @@ ours q31scan_b3_c64_b8r256c $S1 $BIN20 $B8 --vec-raw8 u8 $SCAN --section-beam 3 
 ours q31scan_b3_pig_b8r256c $S1 $BIN20 $B8 --vec-raw8 u8 $SCAN --section-beam 3 --insert-batch-inline-rev --insert-piggyback
 ours q31scan_b3_agg_b8r256c $S1 $BIN20 $B8 --vec-raw8 u8 $SCAN --section-beam 3
 
+# ===== 4c. SPFresh-byte SPACEV 100M full 50-epoch rerun with the system sampler (meminfo/diskstats every 10 s) =====
+if [ "$(freegb)" -gt 300 ]; then
+  SYSIV=10 CSIV=60 SYSFILES="work/spacev_100m_r9010/base.i8bin work/spacev_100m_r9010/pool.i8bin" spf q13full_spfresh_byte spacev_100m_r9010 Int8
+else echo "[$(ts)] SKIP q13full spacev (free $(freegb)G < 300G)"; fi
+
 # ===== 5. Q2.7 epoch-0 recall vs ef_final, efc 12 vs 20; Q2.2 insert-only / delete-only; Q2.6 one change at a time =====
 for c in "$S1 u8" "$V1 i8"; do set -- $c
   ours q27cal_b8r256c_efc12 $1 $BIN $B8 --vec-raw8 $2 --max-epochs 1 --checkpoint-epochs 0 --query-sweep 32,48,64,96,128,192,256
