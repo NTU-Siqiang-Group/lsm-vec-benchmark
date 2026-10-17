@@ -24,7 +24,8 @@
 #     ef        : search internal result num (default 64)
 set -euo pipefail
 
-ROOT=/home/dmo/lsm_vec_benchmark
+ROOT=$(cd "$(dirname "$0")/.." && pwd)
+ROCKSDB_PREFIX="${ROCKSDB_PREFIX:-/home/dmo/SPFresh/rocksdb/_install}"   # RocksDB (RTTI) build used by SPFresh's file-I/O backend
 SPF=$ROOT/spfresh/Release
 DRV=$ROOT/driver
 SRC=$DRV/spfresh_driver.cpp
@@ -94,13 +95,13 @@ if [ ! -x "$BIN" ] || [ "$SRC" -nt "$BIN" ]; then
     -DBOOST_REGEX_DYN_LINK -DBOOST_SERIALIZATION_DYN_LINK -DBOOST_SYSTEM_DYN_LINK \
     -DBOOST_THREAD_DYN_LINK -DBOOST_WSERIALIZATION_DYN_LINK -DROCKSDB -DSPFRESH_NO_SPDK $VDEF \
     -I$ROOT/spfresh/AnnService -I$ROOT/spfresh/ThirdParty/zstd/lib \
-    -I$ROOT/spfresh/ThirdParty/spdk/include -isystem /home/dmo/SPFresh/rocksdb/_install/include \
+    -I$ROOT/spfresh/ThirdParty/spdk/include -isystem $ROCKSDB_PREFIX/include \
     "$SRC" -o "$BIN" \
     "$SPF/libSPTAGLibStatic.a" \
     /usr/lib/x86_64-linux-gnu/libboost_system.so.1.74.0 /usr/lib/x86_64-linux-gnu/libboost_thread.so.1.74.0 \
     /usr/lib/x86_64-linux-gnu/libboost_wserialization.so.1.74.0 /usr/lib/x86_64-linux-gnu/libboost_regex.so.1.74.0 \
     /usr/lib/x86_64-linux-gnu/libboost_filesystem.so.1.74.0 \
-    /home/dmo/SPFresh/rocksdb/_install/lib/librocksdb.a /usr/lib/x86_64-linux-gnu/libjemalloc.so \
+    $ROCKSDB_PREFIX/lib/librocksdb.a /usr/lib/x86_64-linux-gnu/libjemalloc.so \
     /usr/lib/x86_64-linux-gnu/libgflags.so.2.2.2 -lpthread /usr/lib/x86_64-linux-gnu/libsnappy.so.1.1.8 \
     "$SPF/libDistanceUtils.a" "$SPF/libzstd.a" /usr/lib/x86_64-linux-gnu/libnuma.a -ltbb \
     /usr/lib/x86_64-linux-gnu/libboost_atomic.so.1.74.0 /usr/lib/x86_64-linux-gnu/libboost_serialization.so.1.74.0 \

@@ -6,29 +6,14 @@ fig/<name>.pdf. Names are `<family>__<ds>_<scale>_<ratio>`.
 
 # Matrix axes.
 DATASETS = ["sift", "spacev"]
-# Completed cells: 1m, 10m. Larger scales are not reachable on this machine — see
-# docs/100m-feasibility-and-spfresh-scale.md: ours' in-memory bulk build OOMs above ~40M
-# (RNND peak ~2.5 GB/M vs 125 GB RAM), and SPFresh/SPANN+ file-I/O indices exceed the disk.
-SCALES = ["1m", "10m"]
+SCALES = ["1m", "10m", "100m"]
 RATIOS = ["rins", "r9010"]
-
-# Systems we PLOT. DiskANN-IP (fully in-memory) is intentionally EXCLUDED: comparing on-disk methods
-# (ours, its ablations, SPFresh, SPANN+, DiskANN-merge — all paged/file-I/O) against a fully in-memory
-# index is unfair to the on-disk methods. Its raw data is kept in results/raw but not plotted.
-ALL_SYSTEMS = ["ours", "lsm-vec-no-sa", "lsm-vec-basic",
-               "spfresh", "spannplus", "diskann_merge"]
+# Systems we plot (native byte types, 2026-10): ours, SPFresh and FreshDiskANN (StreamingMerge).
+ALL_SYSTEMS = ["ours_b8r256c", "spfresh_byte", "diskann_flush_byte"]
 
 
 def systems_for_scale(scale):
-    # At 1m: ours + the two ablations + the on-disk baselines. At 10m: core on-disk systems.
-    # At 50m/100m: only ours + diskann_merge — SPFresh/SPANN+ file-I/O indices exceed this
-    # machine's disk (~8 GB/M → 400-800 GB), so they are not run there (cite the SPFresh paper's
-    # own 100M numbers instead). See docs/100m-feasibility-and-spfresh-scale.md.
-    if scale == "1m":
-        return ALL_SYSTEMS
-    if scale in ("50m", "100m"):
-        return ["ours", "diskann_merge"]
-    return ["ours", "spfresh", "spannplus", "diskann_merge"]
+    return list(ALL_SYSTEMS)
 
 
 # Figure families. source: 'epoch' (per-epoch JSONL), 'mem' (RSS-vs-time JSONL), or

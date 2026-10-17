@@ -46,6 +46,9 @@ _WONG = {
 # Per-system visual identity: color + linestyle + marker (B/W-safe).
 SYSTEM_STYLE = {
     "ours":          {"color": _WONG["vermil"], "linestyle": "-",  "marker": "o", "label": "LSM-Vec (ours)"},
+    "ours_b8r256c":  {"color": _WONG["vermil"], "linestyle": "-",  "marker": "o", "label": "LSM-Vec (ours)"},
+    "spfresh_byte":  {"color": _WONG["blue"],   "linestyle": "--", "marker": "s", "label": "SPFresh"},
+    "diskann_flush_byte": {"color": _WONG["purple"], "linestyle": (0, (3, 1, 1, 1)), "marker": "v", "label": "FreshDiskANN"},
     "spfresh":       {"color": _WONG["blue"],   "linestyle": "--", "marker": "s", "label": "SPFresh"},
     "spannplus":     {"color": _WONG["green"],  "linestyle": "-.", "marker": "^", "label": "SPANN+"},
     "diskann_ip":    {"color": _WONG["orange"], "linestyle": ":",  "marker": "D", "label": "DiskANN (in-place)"},
@@ -56,7 +59,7 @@ SYSTEM_STYLE = {
 }
 
 # Canonical system order for legends.
-SYSTEM_ORDER = ["ours", "lsm-vec-no-sa", "lsm-vec-basic",
+SYSTEM_ORDER = ["ours_b8r256c", "spfresh_byte", "diskann_flush_byte", "ours", "lsm-vec-no-sa", "lsm-vec-basic",
                 "spfresh", "spannplus", "diskann_ip", "diskann_merge"]
 
 # Single-column figure size (inches). Slightly wider than the strict 3.3" so 7 overlaid

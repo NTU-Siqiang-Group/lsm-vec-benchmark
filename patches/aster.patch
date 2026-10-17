@@ -1,0 +1,1057 @@
+diff --git a/db/graph.cc b/db/graph.cc
+index 33968ccb0..921a0e472 100755
+--- a/db/graph.cc
++++ b/db/graph.cc
+@@ -24,7 +24,7 @@ void inline MergeSortOutEdges(const Edges& existing_edges,
+         if (delete_edge == existing_edges.nxts_out[pivot_ex].nxt) {
+           pivot_ex++;
+           is_deleted = true;
+-          mor->DecayCounter(vertex);
++          if (mor) mor->DecayCounter(vertex);
+           m--;
+         }
+       }
+@@ -56,7 +56,7 @@ void inline MergeSortOutEdges(const Edges& existing_edges,
+     if (existing_edges.nxts_out[pivot_ex].nxt ==
+         new_edges.nxts_out[pivot_new].nxt) {
+       pivot_ex++;
+-      mor->DecayCounter(vertex);
++      if (mor) mor->DecayCounter(vertex);
+       m--;
+     } else if (existing_edges.nxts_out[pivot_ex].nxt >
+                new_edges.nxts_out[pivot_new].nxt) {
+@@ -88,7 +88,7 @@ void inline MergeSortInEdges(const Edges& existing_edges,
+         if (delete_edge == existing_edges.nxts_in[pivot_ex].nxt) {
+           pivot_ex++;
+           is_deleted = true;
+-          mor->DecayCounter(vertex);
++          if (mor) mor->DecayCounter(vertex);
+         }
+       }
+     }
+@@ -119,7 +119,7 @@ void inline MergeSortInEdges(const Edges& existing_edges,
+     if (existing_edges.nxts_in[pivot_ex].nxt ==
+         new_edges.nxts_in[pivot_new].nxt) {
+       pivot_ex++;
+-      mor->DecayCounter(vertex);
++      if (mor) mor->DecayCounter(vertex);
+     } else if (existing_edges.nxts_in[pivot_ex].nxt >
+                new_edges.nxts_in[pivot_new].nxt) {
+       merge_edges_list[edge_count++].nxt = new_edges.nxts_in[pivot_new++].nxt;
+@@ -144,8 +144,13 @@ bool RocksGraph::AdjacentListMergeOp::Merge(const Slice& key,
+     }
+   }
+   Edges new_edges, existing_edges, merged_edges;
+-  decode_edges(&new_edges, value.data(), value.size(), encoding_type_);
+-  decode_edges(&existing_edges, existing_value->data(), existing_value->size(), encoding_type_);
++  if (!decode_edges(&new_edges, value.data(), value.size(), encoding_type_) ||
++      !decode_edges(&existing_edges, existing_value->data(),
++                    existing_value->size(), encoding_type_)) {
++    free_edges(&new_edges);
++    free_edges(&existing_edges);
++    return false;  // corrupt operand: fail the merge, do not fabricate edges
++  }
+   merged_edges.num_edges_out =
+       existing_edges.num_edges_out + new_edges.num_edges_out;
+   merged_edges.num_edges_in =
+@@ -175,8 +180,13 @@ bool RocksGraph::AdjacentListMergeOp::PartialMerge(const Slice& key,
+     }
+   }
+   Edges new_edges, existing_edges, merged_edges;
+-  decode_edges(&new_edges, value.data(), value.size(), encoding_type_);
+-  decode_edges(&existing_edges, existing_value.data(), existing_value.size(), encoding_type_);
++  if (!decode_edges(&new_edges, value.data(), value.size(), encoding_type_) ||
++      !decode_edges(&existing_edges, existing_value.data(),
++                    existing_value.size(), encoding_type_)) {
++    free_edges(&new_edges);
++    free_edges(&existing_edges);
++    return false;  // corrupt operand: fail the merge, do not fabricate edges
++  }
+   merged_edges.num_edges_out =
+       existing_edges.num_edges_out + new_edges.num_edges_out;
+   merged_edges.num_edges_in =
+@@ -323,7 +333,9 @@ node_id_t RocksGraph::random_walk(node_id_t start, float decay_factor) {
+     if (!s.ok()) {
+       return 0;
+     }
+-    decode_edges(&edges, value, encoding_type_);
++    if (!decode_edges(&edges, value, encoding_type_)) {
++      return 0;  // corrupt adjacency: same degraded path as a failed Get
++    }
+     if (edges.num_edges_out == 0) {
+       free_edges(&edges);
+       return cur;
+@@ -356,9 +368,11 @@ Status RocksGraph::AddVertex(node_id_t id) {
+   // if (edge_update_policy_ == EDGE_UPDATE_FULL_LAZY)
+   //   return db_->Merge(WriteOptions(), adj_cf_, key, value);
+   db_->Put(WriteOptions(), adj_cf_, key, value);
+-  value = "";
+-  db_->Put(WriteOptions(), edge_prop_cf_, key, value);
+-  db_->Put(WriteOptions(), vertex_prop_cf_, key, value);
++  if (!skip_property_cfs_) {
++    value = "";
++    db_->Put(WriteOptions(), edge_prop_cf_, key, value);
++    db_->Put(WriteOptions(), vertex_prop_cf_, key, value);
++  }
+   return Status::OK();
+ }
+ 
+@@ -390,7 +404,7 @@ Status RocksGraph::AddEdge(node_id_t from, node_id_t to) {
+     out_policy = AdaptPolicy(from, update_ratio_, lookup_ratio_);
+   }
+   if (out_policy == EDGE_UPDATE_LAZY || out_policy == EDGE_UPDATE_FULL_LAZY) {
+-    mor.AddCounter(from);
++    MaybeAddCounter(from);
+     Edges edges{.num_edges_out = 1, .num_edges_in = 0};
+     edges.nxts_out = new Edge[1];
+     edges.nxts_out[0] = Edge{.nxt = to};
+@@ -416,10 +430,11 @@ Status RocksGraph::AddEdge(node_id_t from, node_id_t to) {
+     if (is_merge)
+       new_edges.num_edges_out--;
+     else
+-      mor.AddCounter(from);
++      MaybeAddCounter(from);
+     if (is_merge) m--;
+     // For self-loops, also insert the in-edge in the same write
+-    if (from == to) {
++    // (skip this special case in minimal mode — no in-edges are written)
++    if (from == to && !minimal_mode_) {
+       in_edge_handled = true;
+       Edges combined{.num_edges_out = new_edges.num_edges_out,
+                      .num_edges_in = new_edges.num_edges_in + 1};
+@@ -430,7 +445,7 @@ Status RocksGraph::AddEdge(node_id_t from, node_id_t to) {
+       if (is_merge_in)
+         combined.num_edges_in--;
+       else
+-        mor.AddCounter(to);
++        MaybeAddCounter(to);
+       std::string new_value;
+       encode_edges(&combined, &new_value, encoding_type_);
+       free_edges(&existing_edges);
+@@ -447,7 +462,7 @@ Status RocksGraph::AddEdge(node_id_t from, node_id_t to) {
+     }
+   }
+ 
+-  if (!in_edge_handled) {
++  if (!in_edge_handled && !minimal_mode_) {
+     VertexKey v_in{.id = to};
+     std::string key_in, value_in;
+     encode_node(v_in, &key_in);
+@@ -459,7 +474,7 @@ Status RocksGraph::AddEdge(node_id_t from, node_id_t to) {
+       in_policy = AdaptPolicy(from, update_ratio_, lookup_ratio_);
+     }
+     if (in_policy == EDGE_UPDATE_LAZY || in_policy == EDGE_UPDATE_FULL_LAZY) {
+-      mor.AddCounter(to);
++      MaybeAddCounter(to);
+       Edges edges{.num_edges_out = 0, .num_edges_in = 1};
+       edges.nxts_in = new Edge[1];
+       edges.nxts_in[0] = Edge{.nxt = from};
+@@ -483,7 +498,7 @@ Status RocksGraph::AddEdge(node_id_t from, node_id_t to) {
+       if (is_merge)
+         new_edges.num_edges_in--;
+       else
+-        mor.AddCounter(to);
++        MaybeAddCounter(to);
+       std::string new_value;
+       encode_edges(&new_edges, &new_value, encoding_type_);
+       free_edges(&existing_edges);
+@@ -503,7 +518,7 @@ Status RocksGraph::AddEdgeLazy(node_id_t from, node_id_t to) {
+     VertexKey v{.id = from};
+     std::string key, value;
+     encode_node(v, &key);
+-    mor.AddCounter(from);
++    MaybeAddCounter(from);
+     Edges edges{.num_edges_out = 1, .num_edges_in = 0};
+     edges.nxts_out = new Edge[1];
+     edges.nxts_out[0] = Edge{.nxt = to};
+@@ -513,11 +528,11 @@ Status RocksGraph::AddEdgeLazy(node_id_t from, node_id_t to) {
+   }
+ 
+   // Reverse edge: add 'from' to in-edge list of 'to'
+-  {
++  if (!minimal_mode_) {
+     VertexKey v{.id = to};
+     std::string key, value;
+     encode_node(v, &key);
+-    mor.AddCounter(to);
++    MaybeAddCounter(to);
+     Edges edges{.num_edges_out = 0, .num_edges_in = 1};
+     edges.nxts_in = new Edge[1];
+     edges.nxts_in[0] = Edge{.nxt = from};
+@@ -539,7 +554,7 @@ Status RocksGraph::AddEdgeBatch(
+   std::unordered_map<node_id_t, std::vector<node_id_t>> in_by_vertex;
+   for (const auto& e : edges) {
+     out_by_vertex[e.first].push_back(e.second);
+-    in_by_vertex[e.second].push_back(e.first);
++    if (!minimal_mode_) in_by_vertex[e.second].push_back(e.first);
+   }
+ 
+   // Sort and deduplicate each vertex's neighbor list
+@@ -595,8 +610,8 @@ Status RocksGraph::AddEdgeBatch(
+       free_edges(&edges_to_merge);
+       batch.Merge(adj_cf_, key, value);
+ 
+-      for (size_t i = 0; i < new_outs.size(); i++) mor.AddCounter(v);
+-      for (size_t i = 0; i < new_ins.size(); i++) mor.AddCounter(v);
++      for (size_t i = 0; i < new_outs.size(); i++) MaybeAddCounter(v);
++      for (size_t i = 0; i < new_ins.size(); i++) MaybeAddCounter(v);
+       m += static_cast<node_id_t>(new_outs.size());
+     } else {
+       // Eager: read existing, merge-insert new edges
+@@ -666,8 +681,8 @@ Status RocksGraph::AddEdgeBatch(
+       free_edges(&new_edges);
+       batch.Put(adj_cf_, key, value);
+ 
+-      for (uint32_t i = 0; i < out_added; i++) mor.AddCounter(v);
+-      for (uint32_t i = 0; i < in_added; i++) mor.AddCounter(v);
++      for (uint32_t i = 0; i < out_added; i++) MaybeAddCounter(v);
++      for (uint32_t i = 0; i < in_added; i++) MaybeAddCounter(v);
+       m += static_cast<node_id_t>(out_added);
+     }
+   }
+@@ -685,7 +700,7 @@ Status RocksGraph::DeleteEdgeBatch(
+   std::unordered_map<node_id_t, std::vector<node_id_t>> del_in_by_vertex;
+   for (const auto& e : edges) {
+     del_out_by_vertex[e.first].push_back(e.second);
+-    del_in_by_vertex[e.second].push_back(e.first);
++    if (!minimal_mode_) del_in_by_vertex[e.second].push_back(e.first);
+   }
+ 
+   auto sort_dedup = [](std::vector<node_id_t>& v) {
+@@ -762,7 +777,7 @@ Status RocksGraph::DeleteEdgeBatch(
+       uint32_t out_count = 0;
+       for (uint32_t i = 0; i < existing.num_edges_out; i++) {
+         if (del_out_set.count(existing.nxts_out[i].nxt)) {
+-          mor.DecayCounter(v);
++          MaybeDecayCounter(v);
+           m--;
+         } else {
+           new_out[out_count++].nxt = existing.nxts_out[i].nxt;
+@@ -774,7 +789,7 @@ Status RocksGraph::DeleteEdgeBatch(
+       uint32_t in_count = 0;
+       for (uint32_t i = 0; i < existing.num_edges_in; i++) {
+         if (del_in_set.count(existing.nxts_in[i].nxt)) {
+-          mor.DecayCounter(v);
++          MaybeDecayCounter(v);
+         } else {
+           new_in[in_count++].nxt = existing.nxts_in[i].nxt;
+         }
+@@ -920,11 +935,11 @@ std::pair<std::string, std::string> RocksGraph::AddEdges(
+   new_edges.nxts_in = new Edge[new_edges.num_edges_in];
+   for (size_t i = 0; i < tos.size(); i++) {
+     new_edges.nxts_out[i].nxt = tos[i];
+-    mor.AddCounter(v);
++    MaybeAddCounter(v);
+   }
+   for (size_t i = 0; i < froms.size(); i++) {
+     new_edges.nxts_in[i].nxt = froms[i];
+-    mor.AddCounter(v);
++    MaybeAddCounter(v);
+   }
+   std::string new_value;
+   std::string key_out;
+@@ -938,7 +953,7 @@ Status RocksGraph::AddVertexWithEdges(node_id_t id,
+                                       std::vector<node_id_t>& out_neighbors,
+                                       std::vector<node_id_t>& in_neighbors) {
+   // Warn if vertex likely already exists (low-cost check via Morris Counter)
+-  if (mor.GetVertexCount(id) > 0) {
++  if (!minimal_mode_ && mor.GetVertexCount(id) > 0) {
+     fprintf(stderr,
+             "Warning: AddVertexWithEdges called on vertex %lld which may "
+             "already exist (degree estimate=%d). This API assumes the vertex "
+@@ -950,16 +965,19 @@ Status RocksGraph::AddVertexWithEdges(node_id_t id,
+   std::sort(out_neighbors.begin(), out_neighbors.end());
+   out_neighbors.erase(std::unique(out_neighbors.begin(), out_neighbors.end()),
+                       out_neighbors.end());
+-  std::sort(in_neighbors.begin(), in_neighbors.end());
+-  in_neighbors.erase(std::unique(in_neighbors.begin(), in_neighbors.end()),
+-                     in_neighbors.end());
++  if (!minimal_mode_) {
++    std::sort(in_neighbors.begin(), in_neighbors.end());
++    in_neighbors.erase(std::unique(in_neighbors.begin(), in_neighbors.end()),
++                       in_neighbors.end());
++  }
+ 
+   // Build the full adjacency list for this vertex
+   Edges edges;
+   edges.num_edges_out = static_cast<uint32_t>(out_neighbors.size());
+-  edges.num_edges_in = static_cast<uint32_t>(in_neighbors.size());
++  edges.num_edges_in =
++      minimal_mode_ ? 0 : static_cast<uint32_t>(in_neighbors.size());
+   edges.nxts_out = new Edge[edges.num_edges_out];
+-  edges.nxts_in = new Edge[edges.num_edges_in];
++  edges.nxts_in = minimal_mode_ ? nullptr : new Edge[edges.num_edges_in];
+   for (uint32_t i = 0; i < edges.num_edges_out; i++) {
+     edges.nxts_out[i].nxt = out_neighbors[i];
+   }
+@@ -978,18 +996,23 @@ Status RocksGraph::AddVertexWithEdges(node_id_t id,
+   // Write the vertex adjacency list as a single entry
+   batch.Put(adj_cf_, key, value);
+ 
+-  // Initialize property column families
+-  batch.Put(edge_prop_cf_, key, "");
+-  batch.Put(vertex_prop_cf_, key, "");
++  // Initialize property column families (skipped when the caller never reads
++  // vertex/edge properties — saves two memtable/WAL entries per vertex).
++  if (!skip_property_cfs_) {
++    batch.Put(edge_prop_cf_, key, "");
++    batch.Put(vertex_prop_cf_, key, "");
++  }
+ 
+   // Update counters
+   n++;
+   m += static_cast<node_id_t>(out_neighbors.size());
+   for (uint32_t i = 0; i < out_neighbors.size(); i++) {
+-    mor.AddCounter(id);
++    MaybeAddCounter(id);
+   }
+-  for (uint32_t i = 0; i < in_neighbors.size(); i++) {
+-    mor.AddCounter(id);
++  if (!minimal_mode_) {
++    for (uint32_t i = 0; i < in_neighbors.size(); i++) {
++      MaybeAddCounter(id);
++    }
+   }
+ 
+   return db_->Write(WriteOptions(), &batch);
+@@ -1032,7 +1055,7 @@ Status RocksGraph::DeleteEdge(node_id_t from, node_id_t to) {
+     uint32_t edge_count = 0;
+     while (pivot_ex < existing_edges.num_edges_out) {
+       if (existing_edges.nxts_out[pivot_ex].nxt == to) {
+-        mor.DecayCounter(from);
++        MaybeDecayCounter(from);
+         m--;
+         pivot_ex++;
+       } else {
+@@ -1051,56 +1074,58 @@ Status RocksGraph::DeleteEdge(node_id_t from, node_id_t to) {
+     }
+   }
+ 
+-  VertexKey v_in{.id = to};
+-  std::string key_in, value_in;
+-  encode_node(v_in, &key_in);
+-  int in_policy = edge_update_policy_;
+-  if (in_policy == EDGE_UPDATE_ADAPTIVE) {
+-    in_policy = AdaptPolicy(from, update_ratio_, lookup_ratio_);
+-  }
+-  if (in_policy == EDGE_UPDATE_LAZY && encoding_type_ != ENCODING_TYPE_EFP) {
+-    Edges edges{.num_edges_out = 0, .num_edges_in = 1};
+-    edges.nxts_in = new Edge[1];
+-    edges.nxts_in[0] = Edge{.nxt = -(from + 1)};
+-    encode_edges(&edges, &value_in, encoding_type_);
+-    free_edges(&edges);
+-    s = db_->Merge(WriteOptions(), adj_cf_, key_in, value_in);
+-    if (!s.ok() && !s.IsNotFound()) {
+-      return s;
+-    }
+-  } else if (in_policy == EDGE_UPDATE_EAGER ||
+-             encoding_type_ == ENCODING_TYPE_EFP) {
+-    Edges existing_edges{.num_edges_in = 0};
+-    s = GetAllEdges(to, &existing_edges);
+-    if (!s.ok() && !s.IsNotFound()) {
+-      return s;
++  if (!minimal_mode_) {
++    VertexKey v_in{.id = to};
++    std::string key_in, value_in;
++    encode_node(v_in, &key_in);
++    int in_policy = edge_update_policy_;
++    if (in_policy == EDGE_UPDATE_ADAPTIVE) {
++      in_policy = AdaptPolicy(from, update_ratio_, lookup_ratio_);
+     }
+-    Edges new_edges{.num_edges_out = existing_edges.num_edges_out,
+-                    .num_edges_in = existing_edges.num_edges_in};
+-    // copy existing out edges
+-    new_edges.nxts_out = new Edge[existing_edges.num_edges_out];
+-    memcpy(new_edges.nxts_out, existing_edges.nxts_out,
+-           existing_edges.num_edges_out * sizeof(Edge));
+-    new_edges.nxts_in = new Edge[new_edges.num_edges_in];
+-    node_id_t pivot_ex = 0;
+-    uint32_t edge_count = 0;
+-    while (pivot_ex < existing_edges.num_edges_in) {
+-      if (existing_edges.nxts_in[pivot_ex].nxt == from) {
+-        mor.DecayCounter(to);
+-        pivot_ex++;
+-      } else {
+-        new_edges.nxts_in[edge_count++].nxt =
+-            existing_edges.nxts_in[pivot_ex++].nxt;
++    if (in_policy == EDGE_UPDATE_LAZY && encoding_type_ != ENCODING_TYPE_EFP) {
++      Edges edges{.num_edges_out = 0, .num_edges_in = 1};
++      edges.nxts_in = new Edge[1];
++      edges.nxts_in[0] = Edge{.nxt = -(from + 1)};
++      encode_edges(&edges, &value_in, encoding_type_);
++      free_edges(&edges);
++      s = db_->Merge(WriteOptions(), adj_cf_, key_in, value_in);
++      if (!s.ok() && !s.IsNotFound()) {
++        return s;
++      }
++    } else if (in_policy == EDGE_UPDATE_EAGER ||
++               encoding_type_ == ENCODING_TYPE_EFP) {
++      Edges existing_edges{.num_edges_in = 0};
++      s = GetAllEdges(to, &existing_edges);
++      if (!s.ok() && !s.IsNotFound()) {
++        return s;
++      }
++      Edges new_edges{.num_edges_out = existing_edges.num_edges_out,
++                      .num_edges_in = existing_edges.num_edges_in};
++      // copy existing out edges
++      new_edges.nxts_out = new Edge[existing_edges.num_edges_out];
++      memcpy(new_edges.nxts_out, existing_edges.nxts_out,
++             existing_edges.num_edges_out * sizeof(Edge));
++      new_edges.nxts_in = new Edge[new_edges.num_edges_in];
++      node_id_t pivot_ex = 0;
++      uint32_t edge_count = 0;
++      while (pivot_ex < existing_edges.num_edges_in) {
++        if (existing_edges.nxts_in[pivot_ex].nxt == from) {
++          MaybeDecayCounter(to);
++          pivot_ex++;
++        } else {
++          new_edges.nxts_in[edge_count++].nxt =
++              existing_edges.nxts_in[pivot_ex++].nxt;
++        }
++      }
++      new_edges.num_edges_in = edge_count;
++      std::string new_value;
++      encode_edges(&new_edges, &new_value, encoding_type_);
++      free_edges(&existing_edges);
++      free_edges(&new_edges);
++      s = db_->Put(WriteOptions(), adj_cf_, key_in, new_value);
++      if (!s.ok() && !s.IsNotFound()) {
++        return s;
+       }
+-    }
+-    new_edges.num_edges_in = edge_count;
+-    std::string new_value;
+-    encode_edges(&new_edges, &new_value, encoding_type_);
+-    free_edges(&existing_edges);
+-    free_edges(&new_edges);
+-    s = db_->Put(WriteOptions(), adj_cf_, key_in, new_value);
+-    if (!s.ok() && !s.IsNotFound()) {
+-      return s;
+     }
+   }
+   return s;
+@@ -1146,7 +1171,9 @@ Status RocksGraph::GetAllEdges(node_id_t src, Edges* edges) {
+   if (!s.ok()) {
+     return s;
+   }
+-  decode_edges(edges, value, encoding_type_);
++  if (!decode_edges(edges, value, encoding_type_)) {
++    return Status::Corruption("graph adjacency list failed to decode");
++  }
+   return Status::OK();
+   // if(edge_update_policy_ != EDGE_UPDATE_EAGER){
+   // GetMergeOperandsOptions merge_operands_info;
+@@ -1182,6 +1209,7 @@ node_id_t RocksGraph::GetInDegree(node_id_t src) {
+ 
+ node_id_t RocksGraph::GetDegreeApproximate(node_id_t src,
+                                            int filter_type_manual) {
++  if (minimal_mode_) return GetOutDegree(src);
+   if (filter_type_manual > 0 && filter_type_ != FILTER_TYPE_ALL) {
+     printf(
+         "degree filter setting error: filter_type_manual > 0 should only be "
+diff --git a/graph_test/encoding_test.cc b/graph_test/encoding_test.cc
+new file mode 100644
+index 000000000..f1cd84159
+--- /dev/null
++++ b/graph_test/encoding_test.cc
+@@ -0,0 +1,131 @@
++// Standalone test for ENCODING_TYPE_VARINT adjacency encoding:
++// round-trip (including bit-63 flagged ids), encoded-size bounds, and
++// malformed-input rejection. Header-only dependencies; build:
++//   g++ -std=c++17 -I include -I . graph_test/encoding_test.cc -o encoding_test
++#include <cassert>
++#include <cstdio>
++#include <cstring>
++#include <string>
++#include <vector>
++
++#include "rocksdb/graph.h"
++
++using ROCKSDB_NAMESPACE::Edge;
++using ROCKSDB_NAMESPACE::Edges;
++using ROCKSDB_NAMESPACE::decode_edges;
++using ROCKSDB_NAMESPACE::encode_edges;
++using ROCKSDB_NAMESPACE::free_edges;
++using ROCKSDB_NAMESPACE::node_id_t;
++
++namespace {
++
++constexpr uint64_t kBit63 = 1ULL << 63;
++
++std::string encode(const std::vector<node_id_t>& out_ids,
++                   const std::vector<node_id_t>& in_ids) {
++  Edges e;
++  e.num_edges_out = static_cast<uint32_t>(out_ids.size());
++  e.num_edges_in = static_cast<uint32_t>(in_ids.size());
++  std::vector<Edge> outs(out_ids.size()), ins(in_ids.size());
++  for (size_t i = 0; i < out_ids.size(); i++) outs[i].nxt = out_ids[i];
++  for (size_t i = 0; i < in_ids.size(); i++) ins[i].nxt = in_ids[i];
++  e.nxts_out = outs.data();
++  e.nxts_in = ins.data();
++  std::string value;
++  encode_edges(&e, &value, ENCODING_TYPE_VARINT);  // writes the count header
++  return value;
++}
++
++void test_round_trip() {
++  const std::vector<node_id_t> ids = {
++      0,
++      1,
++      127,
++      128,
++      1000000,
++      (1ULL << 62),
++      static_cast<node_id_t>(kBit63 | 42),
++      static_cast<node_id_t>(kBit63 | 1000000),
++  };
++  std::string value = encode(ids, ids);
++  Edges d;
++  assert(decode_edges(&d, value.data(), value.size(), ENCODING_TYPE_VARINT));
++  assert(d.num_edges_out == ids.size());
++  assert(d.num_edges_in == ids.size());
++  for (size_t i = 0; i < ids.size(); i++) {
++    assert(static_cast<uint64_t>(d.nxts_out[i].nxt) ==
++           static_cast<uint64_t>(ids[i]));
++    assert(static_cast<uint64_t>(d.nxts_in[i].nxt) ==
++           static_cast<uint64_t>(ids[i]));
++  }
++  free_edges(&d);
++  std::printf("round_trip ok\n");
++}
++
++// The point of flag relocation: a bit-63-tagged small id must encode as
++// compactly as its untagged twin (<= 4 bytes), never the 10-byte worst case.
++void test_flagged_size() {
++  std::string untagged = encode({1000000}, {});
++  std::string tagged =
++      encode({static_cast<node_id_t>(kBit63 | 1000000)}, {});
++  size_t header = sizeof(uint32_t) * 2;
++  size_t untagged_bytes = untagged.size() - header;
++  size_t tagged_bytes = tagged.size() - header;
++  assert(untagged_bytes <= 4);
++  assert(tagged_bytes <= 4);
++  assert(tagged_bytes <= untagged_bytes + 1);
++  std::printf("flagged_size ok (untagged=%zu tagged=%zu bytes)\n",
++              untagged_bytes, tagged_bytes);
++}
++
++void test_malformed() {
++  std::string good = encode({1000000, static_cast<node_id_t>(kBit63 | 7)},
++                            {123456});
++  Edges d;
++
++  // Truncated payload: cut the last byte.
++  {
++    std::string t = good.substr(0, good.size() - 1);
++    assert(!decode_edges(&d, t.data(), t.size(), ENCODING_TYPE_VARINT));
++  }
++  // Truncated header.
++  {
++    assert(!decode_edges(&d, good.data(), size_t{3}, ENCODING_TYPE_VARINT));
++  }
++  // Edge count larger than the payload could possibly hold.
++  {
++    std::string t = good;
++    uint32_t huge = 1u << 30;
++    std::memcpy(&t[0], &huge, sizeof(uint32_t));
++    assert(!decode_edges(&d, t.data(), t.size(), ENCODING_TYPE_VARINT));
++  }
++  // Overlong continuation run (11 bytes of 0x80).
++  {
++    std::string t;
++    uint32_t one = 1, zero = 0;
++    t.append(reinterpret_cast<const char*>(&one), sizeof(uint32_t));
++    t.append(reinterpret_cast<const char*>(&zero), sizeof(uint32_t));
++    t.append(11, static_cast<char>(0x80));
++    assert(!decode_edges(&d, t.data(), t.size(), ENCODING_TYPE_VARINT));
++  }
++  // NONE encoding: count/payload mismatch must fail instead of reading OOB.
++  {
++    std::string t;
++    uint32_t huge = 1u << 20, zero = 0;
++    t.append(reinterpret_cast<const char*>(&huge), sizeof(uint32_t));
++    t.append(reinterpret_cast<const char*>(&zero), sizeof(uint32_t));
++    t.append(16, '\0');
++    assert(!decode_edges(&d, t.data(), t.size(), ENCODING_TYPE_NONE));
++  }
++  std::printf("malformed ok\n");
++}
++
++}  // namespace
++
++int main() {
++  test_round_trip();
++  test_flagged_size();
++  test_malformed();
++  std::printf("encoding_test: ALL PASS\n");
++  return 0;
++}
+diff --git a/graph_test/graph_benchmark_new.h b/graph_test/graph_benchmark_new.h
+index 031c8cdd3..6dbabbd74 100755
+--- a/graph_test/graph_benchmark_new.h
++++ b/graph_test/graph_benchmark_new.h
+@@ -34,8 +34,9 @@ int generatePowerLawDegree(double alpha, int minDegree, int maxDegree,
+ 
+ RocksGraph* CreateRocksGraph(Options& options, int policy,
+                              int encoding = ENCODING_TYPE_NONE,
+-                             bool reinit = true) {
+-  return new RocksGraph(options, policy, encoding, reinit);
++                             bool reinit = true, bool minimal_mode = false) {
++  return new RocksGraph(options, policy, encoding, reinit, "/tmp/demo",
++                        minimal_mode);
+ }
+ 
+ struct Timer {
+@@ -113,12 +114,14 @@ class GraphBenchmarkTool {
+   };
+ 
+   GraphBenchmarkTool(Options& options, bool is_directed, int policy,
+-                     int encoding, bool reinit)
++                     int encoding, bool reinit, bool minimal_mode = false)
+       : is_directed_(is_directed),
+         policy_(policy),
+         encoding_(encoding),
+-        reinit_(reinit) {
+-    graph_ = CreateRocksGraph(options, policy_, encoding_, reinit_);
++        reinit_(reinit),
++        minimal_mode_(minimal_mode) {
++    graph_ =
++        CreateRocksGraph(options, policy_, encoding_, reinit_, minimal_mode_);
+   }
+ 
+   void LoadGraph(const std::string& graph_file) {
+@@ -1770,6 +1773,140 @@ class GraphBenchmarkTool {
+     }
+   }
+ 
++  void MinimalModeTest(node_id_t n, node_id_t m) {
++    if (n <= 0 || m <= 0) {
++      std::cout << "MinimalModeTest skipped: invalid sizes." << std::endl;
++      return;
++    }
++    if (!minimal_mode_) {
++      std::cout << "MinimalModeTest skipped: tool not constructed in "
++                   "minimal_mode."
++                << std::endl;
++      return;
++    }
++    InitNodes(n);
++
++    std::random_device rd;
++    std::mt19937 rng(rd());
++    std::uniform_int_distribution<node_id_t> dist(0, n - 1);
++
++    // Generate unique edges
++    std::vector<std::pair<node_id_t, node_id_t>> all_edges;
++    std::unordered_set<std::pair<node_id_t, node_id_t>, EdgePairHash>
++        unique_edges;
++    while (static_cast<node_id_t>(all_edges.size()) < m) {
++      node_id_t from = dist(rng);
++      node_id_t to = dist(rng);
++      std::pair<node_id_t, node_id_t> edge(from, to);
++      if (unique_edges.insert(edge).second) {
++        all_edges.push_back(edge);
++      }
++    }
++
++    // Half via AddEdge (single), half via AddEdgeBatch
++    size_t half = all_edges.size() / 2;
++    std::vector<std::pair<node_id_t, node_id_t>> batch_edges(
++        all_edges.begin() + half, all_edges.end());
++
++    for (size_t i = 0; i < half; i++) {
++      Status s = graph_->AddEdge(all_edges[i].first, all_edges[i].second);
++      if (!s.ok()) {
++        std::cout << "AddEdge error: " << s.ToString() << std::endl;
++        exit(0);
++      }
++    }
++    Status s = graph_->AddEdgeBatch(batch_edges);
++    if (!s.ok()) {
++      std::cout << "AddEdgeBatch error: " << s.ToString() << std::endl;
++      exit(0);
++    }
++
++    // Delete 30% via DeleteEdgeBatch
++    std::vector<size_t> indices(all_edges.size());
++    for (size_t i = 0; i < all_edges.size(); ++i) indices[i] = i;
++    std::shuffle(indices.begin(), indices.end(), rng);
++    size_t delete_count = all_edges.size() * 3 / 10;
++    std::vector<std::pair<node_id_t, node_id_t>> edges_to_delete;
++    std::unordered_set<std::pair<node_id_t, node_id_t>, EdgePairHash>
++        deleted_set;
++    for (size_t i = 0; i < delete_count; ++i) {
++      edges_to_delete.push_back(all_edges[indices[i]]);
++      deleted_set.insert(all_edges[indices[i]]);
++    }
++    s = graph_->DeleteEdgeBatch(edges_to_delete);
++    if (!s.ok()) {
++      std::cout << "DeleteEdgeBatch error: " << s.ToString() << std::endl;
++      exit(0);
++    }
++
++    // Build expected state: out-edges only (minimal mode invariant)
++    std::unordered_map<node_id_t, std::unordered_set<node_id_t>> expected_out;
++    for (const auto& edge : all_edges) {
++      if (deleted_set.find(edge) == deleted_set.end()) {
++        expected_out[edge.first].insert(edge.second);
++      }
++    }
++
++    // Verify: out-edges match, in-edges always empty
++    size_t mismatch_nodes = 0;
++    size_t mismatch_edges = 0;
++    size_t in_edge_violations = 0;
++    for (node_id_t node = 0; node < n; ++node) {
++      Edges edges_read;
++      s = graph_->GetAllEdges(node, &edges_read);
++      std::unordered_set<node_id_t> got_out;
++      uint32_t got_in_count = 0;
++      if (s.ok()) {
++        for (uint32_t i = 0; i < edges_read.num_edges_out; ++i)
++          got_out.insert(edges_read.nxts_out[i].nxt);
++        got_in_count = edges_read.num_edges_in;
++        free_edges(&edges_read);
++      } else if (!s.IsNotFound()) {
++        std::cout << "get error: " << s.ToString() << std::endl;
++        exit(0);
++      }
++
++      if (got_in_count != 0) {
++        in_edge_violations++;
++        if (in_edge_violations <= 10) {
++          std::cout << "Minimal-mode violation: node " << node
++                    << " has " << got_in_count << " in-edges" << std::endl;
++        }
++      }
++
++      const auto& exp_out = expected_out[node];
++      bool match = (got_out.size() == exp_out.size());
++      if (match) {
++        for (const auto& nb : exp_out)
++          if (got_out.find(nb) == got_out.end()) { match = false; break; }
++      }
++      if (!match) {
++        mismatch_nodes++;
++        if (mismatch_nodes <= 10) {
++          std::cout << "Mismatch node " << node
++                    << " (out: got=" << got_out.size()
++                    << " exp=" << exp_out.size() << ")" << std::endl;
++        }
++        for (const auto& nb : exp_out)
++          if (got_out.find(nb) == got_out.end()) mismatch_edges++;
++        for (const auto& nb : got_out)
++          if (exp_out.find(nb) == exp_out.end()) mismatch_edges++;
++      }
++    }
++
++    std::cout << "MinimalModeTest result: nodes=" << n
++              << " total_edges=" << m
++              << " deleted=" << delete_count
++              << " mismatched_nodes=" << mismatch_nodes
++              << " mismatch_edges=" << mismatch_edges
++              << " in_edge_violations=" << in_edge_violations << std::endl;
++    if (mismatch_nodes == 0 && in_edge_violations == 0) {
++      std::cout << "MinimalModeTest: PASS" << std::endl;
++    } else {
++      std::cout << "MinimalModeTest: FAIL" << std::endl;
++    }
++  }
++
+  private:
+   RocksGraph* graph_;
+   GraphBenchProfiler profiler_;
+@@ -1777,6 +1914,7 @@ class GraphBenchmarkTool {
+   int policy_;
+   int encoding_;
+   bool reinit_;
++  bool minimal_mode_ = false;
+ };
+ 
+ }  // namespace ROCKSDB_NAMESPACE
+diff --git a/graph_test/graph_example.cc b/graph_test/graph_example.cc
+index dedaca32e..e42888560 100755
+--- a/graph_test/graph_example.cc
++++ b/graph_test/graph_example.cc
+@@ -32,6 +32,11 @@ DEFINE_bool(run_add_edge_batch_test, false,
+             "Run AddEdgeBatch verification test");
+ DEFINE_bool(run_delete_edge_batch_test, false,
+             "Run DeleteEdgeBatch verification test");
++DEFINE_bool(minimal_mode, false,
++            "Construct RocksGraph in minimal mode (no Morris counter, no "
++            "adaptive policy, out-edges only)");
++DEFINE_bool(run_minimal_mode_test, false,
++            "Run minimal-mode verification test");
+ DEFINE_bool(edge_test_mix_delete, false,
+             "Mix 20% deletes during edge interface test");
+ DEFINE_double(update_ratio, 0.5, "Update ratio for adaptive policy");
+@@ -88,7 +93,7 @@ int main(int argc, char* argv[]) {
+ 
+   rocksdb::GraphBenchmarkTool tool(options, FLAGS_is_directed,
+                                    FLAGS_update_policy, FLAGS_encoding_type,
+-                                   FLAGS_reinit);
++                                   FLAGS_reinit, FLAGS_minimal_mode);
+   tool.SetRatio(FLAGS_update_ratio, 1 - FLAGS_update_ratio);
+ 
+   if (FLAGS_run_edge_interface_test) {
+@@ -117,6 +122,11 @@ int main(int argc, char* argv[]) {
+     return 0;
+   }
+ 
++  if (FLAGS_run_minimal_mode_test) {
++    tool.MinimalModeTest(FLAGS_load_vertices, FLAGS_load_edges);
++    return 0;
++  }
++
+   if (FLAGS_run_morris_counter_test) {
+     tool.MorrisCounterTest();
+     return 0;
+diff --git a/include/rocksdb/graph.h b/include/rocksdb/graph.h
+index 653c437f2..6b877b2dd 100755
+--- a/include/rocksdb/graph.h
++++ b/include/rocksdb/graph.h
+@@ -31,6 +31,7 @@ using edge_id_t = int64_t;
+ 
+ #define ENCODING_TYPE_NONE 0x0
+ #define ENCODING_TYPE_EFP 0x1
++#define ENCODING_TYPE_VARINT 0x2  // 20260602: LEB128 per-edge, no per-list overhead
+ 
+ #define FILTER_TYPE_NONE 0x0
+ #define FILTER_TYPE_CMS 0x1
+@@ -129,6 +130,51 @@ node_id_t inline decode_node(const std::string& key) {
+   return id;
+ }
+ 
++// 20260602 varint (LEB128) helpers for ENCODING_TYPE_VARINT.
++//
++// Ids are stored with their high flag bit relocated to the LSB
++// (zigzag-style): encoded = (u << 1) | (u >> 63). Callers that tag ids by
++// setting bit 63 (e.g. an update-id namespace) would otherwise pay the
++// worst case — LEB128 spends 7 payload bits per byte, so a value with
++// bit 63 set always needs 10 bytes while its untagged twin fits in 1-3.
++// With the flag in the LSB, tagged and untagged ids encode to the same
++// length (±1 byte at a 7-bit boundary), so the encoding's win is
++// independent of how many ids carry the flag.
++void inline encode_varint(uint64_t v, std::string* value) {
++  while (v >= 0x80) {
++    value->push_back(static_cast<char>((v & 0x7F) | 0x80));
++    v >>= 7;
++  }
++  value->push_back(static_cast<char>(v));
++}
++
++uint64_t inline varint_relocate_flag(uint64_t u) {  // bit 63 -> bit 0
++  return (u << 1) | (u >> 63);
++}
++
++uint64_t inline varint_restore_flag(uint64_t enc) {  // bit 0 -> bit 63
++  return (enc >> 1) | (enc << 63);
++}
++
++// Bounded decode: reads at most 10 bytes and never past data + size.
++// Returns false on truncated input or a continuation run that would
++// overflow 64 bits (corrupt data must fail loudly, not read wild memory).
++bool inline decode_varint(const char* data, size_t size, size_t& pos,
++                          uint64_t* out) {
++  uint64_t result = 0;
++  int shift = 0;
++  while (true) {
++    if (pos >= size || shift > 63) return false;
++    uint8_t byte = static_cast<uint8_t>(data[pos++]);
++    if (shift == 63 && (byte & 0x7E) != 0) return false;  // > 64 bits
++    result |= static_cast<uint64_t>(byte & 0x7F) << shift;
++    if ((byte & 0x80) == 0) break;
++    shift += 7;
++  }
++  *out = result;
++  return true;
++}
++
+ void inline encode_edge(const Edge* edge, std::string* value) {
+   // int byte_to_fill = sizeof(Value);
+   // for (int i = byte_to_fill - 1; i >= 0; i--) {
+@@ -179,6 +225,17 @@ void inline encode_edges(
+     for (uint32_t i = 0; i < edges->num_edges_in; i++) {
+       encode_edge(&edges->nxts_in[i], value);
+     }
++  } else if (encoding_type == ENCODING_TYPE_VARINT) {
++    for (uint32_t i = 0; i < edges->num_edges_out; i++) {
++      encode_varint(
++          varint_relocate_flag(static_cast<uint64_t>(edges->nxts_out[i].nxt)),
++          value);
++    }
++    for (uint32_t i = 0; i < edges->num_edges_in; i++) {
++      encode_varint(
++          varint_relocate_flag(static_cast<uint64_t>(edges->nxts_in[i].nxt)),
++          value);
++    }
+   } else if (encoding_type == ENCODING_TYPE_EFP) {
+     global_parameters params;
+     {
+@@ -204,15 +261,33 @@ void inline encode_edges(
+   }
+ }
+ 
+-void inline decode_edges(
++// Returns false when the value is malformed (truncated header, edge counts
++// inconsistent with the payload, or a corrupt varint). On failure *edges is
++// left empty (no allocations leak); callers must surface corruption instead
++// of proceeding.
++bool inline decode_edges(
+     Edges* edges, const char* data, size_t data_size, int encoding_type,
+     node_id_t universe = std::numeric_limits<uint32_t>::max()) {
+   edges->nxts_out = nullptr;
+   edges->nxts_in = nullptr;
++  edges->num_edges_out = 0;
++  edges->num_edges_in = 0;
++  if (data_size < sizeof(uint32_t) * 2) return false;  // truncated header
+   edges->num_edges_out = *reinterpret_cast<const uint32_t*>(data);
+   edges->num_edges_in =
+       *reinterpret_cast<const uint32_t*>(data + sizeof(uint32_t));
+   if (encoding_type == ENCODING_TYPE_NONE) {
++    // Guard before allocating/copying: counts must match the payload size,
++    // otherwise a corrupt header drives an out-of-bounds read.
++    uint64_t need = sizeof(uint32_t) * 2 +
++                    (static_cast<uint64_t>(edges->num_edges_out) +
++                     static_cast<uint64_t>(edges->num_edges_in)) *
++                        sizeof(Edge);
++    if (need > data_size) {
++      edges->num_edges_out = 0;
++      edges->num_edges_in = 0;
++      return false;
++    }
+     edges->nxts_out = new Edge[edges->num_edges_out];
+     memcpy(edges->nxts_out, data + sizeof(uint32_t) * 2,
+            edges->num_edges_out * sizeof(Edge));
+@@ -221,6 +296,46 @@ void inline decode_edges(
+            data + sizeof(uint32_t) * 2 +
+                edges->num_edges_out * sizeof(Edge),
+            edges->num_edges_in * sizeof(Edge));
++  } else if (encoding_type == ENCODING_TYPE_VARINT) {
++    // Each edge takes >= 1 byte, so the counts alone bound the allocation:
++    // a corrupt header cannot demand more edges than the payload could hold.
++    uint64_t total = static_cast<uint64_t>(edges->num_edges_out) +
++                     static_cast<uint64_t>(edges->num_edges_in);
++    if (sizeof(uint32_t) * 2 + total > data_size) {
++      edges->num_edges_out = 0;
++      edges->num_edges_in = 0;
++      return false;
++    }
++    size_t pos = sizeof(uint32_t) * 2;
++    uint64_t enc = 0;
++    edges->nxts_out = new Edge[edges->num_edges_out];
++    for (uint32_t i = 0; i < edges->num_edges_out; i++) {
++      if (!decode_varint(data, data_size, pos, &enc)) {
++        delete[] edges->nxts_out;
++        delete[] edges->nxts_in;
++        edges->nxts_out = nullptr;
++        edges->nxts_in = nullptr;
++        edges->num_edges_out = 0;
++        edges->num_edges_in = 0;
++        return false;
++      }
++      edges->nxts_out[i].nxt =
++          static_cast<node_id_t>(varint_restore_flag(enc));
++    }
++    edges->nxts_in = new Edge[edges->num_edges_in];
++    for (uint32_t i = 0; i < edges->num_edges_in; i++) {
++      if (!decode_varint(data, data_size, pos, &enc)) {
++        delete[] edges->nxts_out;
++        delete[] edges->nxts_in;
++        edges->nxts_out = nullptr;
++        edges->nxts_in = nullptr;
++        edges->num_edges_out = 0;
++        edges->num_edges_in = 0;
++        return false;
++      }
++      edges->nxts_in[i].nxt =
++          static_cast<node_id_t>(varint_restore_flag(enc));
++    }
+   } else if (encoding_type == ENCODING_TYPE_EFP) {
+     global_parameters params;
+     typename uniform_partitioned_sequence<
+@@ -254,12 +369,14 @@ void inline decode_edges(
+       }
+     }
+   }
++  return true;
+ }
+ 
+-void inline decode_edges(
++bool inline decode_edges(
+     Edges* edges, const std::string& value, int encoding_type,
+     node_id_t universe = std::numeric_limits<uint32_t>::max()) {
+-  decode_edges(edges, value.data(), value.size(), encoding_type, universe);
++  return decode_edges(edges, value.data(), value.size(), encoding_type,
++                      universe);
+ }
+ 
+ void inline free_edges(Edges* edges) {
+@@ -382,6 +499,11 @@ class RocksGraph {
+   int encoding_type_ = ENCODING_TYPE_NONE;
+   int edge_update_policy_ = EDGE_UPDATE_EAGER;
+   bool auto_reinitialize_ = false;
++  bool minimal_mode_ = false;
++  // When set, AddVertex/AddVertexWithEdges skip the (empty-value) writes to
++  // the edge/vertex property column families. Safe only if the caller never
++  // reads vertex/edge properties (LSM-Vec does not). Default off.
++  bool skip_property_cfs_ = false;
+   double update_ratio_ = 0.5;
+   double lookup_ratio_ = 0.5;
+   double cache_miss_rate_ = 0.9;
+@@ -422,16 +544,27 @@ class RocksGraph {
+ 
+   RocksGraph(Options& options, int edge_update_policy = EDGE_UPDATE_ADAPTIVE,
+              int encoding_type = ENCODING_TYPE_NONE,
+-             bool auto_reinitialize = false, std::string db_path = "/tmp/demo")
++             bool auto_reinitialize = false, std::string db_path = "/tmp/demo",
++             bool minimal_mode = false, bool skip_property_cfs = false)
+       : n(0),
+         m(0),
+         encoding_type_(encoding_type),
+         edge_update_policy_(edge_update_policy),
+         auto_reinitialize_(auto_reinitialize),
++        minimal_mode_(minimal_mode),
++        skip_property_cfs_(skip_property_cfs),
+         db_path_(db_path),
+         cms_out(),
+         cms_in(),
+         mor(){
++    if (minimal_mode_ &&
++        edge_update_policy != EDGE_UPDATE_EAGER &&
++        edge_update_policy != EDGE_UPDATE_LAZY) {
++      std::cerr << "RocksGraph: minimal_mode requires EDGE_UPDATE_EAGER or "
++                   "EDGE_UPDATE_LAZY (got policy="
++                << edge_update_policy << ")" << std::endl;
++      exit(1);
++    }
+     auto table_options =
+         options.table_factory->GetOptions<rocksdb::BlockBasedTableOptions>();
+     table_options->filter_policy.reset(
+@@ -445,8 +578,8 @@ class RocksGraph {
+     // }
+     options.create_missing_column_families = true;
+     std::vector<ColumnFamilyDescriptor> column_families;
+-    options.merge_operator.reset(
+-        new AdjacentListMergeOp(encoding_type_, &mor, m));
++    options.merge_operator.reset(new AdjacentListMergeOp(
++        encoding_type_, minimal_mode_ ? nullptr : &mor, m));
+     column_families.emplace_back(kDefaultColumnFamilyName, options);
+     // switch to merge operator for properties
+     options.merge_operator.reset(new PropertyMergeOp(encoding_type_));
+@@ -584,6 +717,15 @@ class RocksGraph {
+ 
+   void SetRate(double cache_miss_rate) { cache_miss_rate_ = cache_miss_rate; }
+ 
++  bool IsMinimalMode() const { return minimal_mode_; }
++
++  inline void MaybeAddCounter(node_id_t v) {
++    if (!minimal_mode_) mor.AddCounter(v);
++  }
++  inline void MaybeDecayCounter(node_id_t v) {
++    if (!minimal_mode_) mor.DecayCounter(v);
++  }
++
+   int AdaptPolicy(node_id_t src, double update_ratio, double lookup_ratio) {
+     if (level_num_update_countdown == 0) {
+       level_num_update_countdown = 100000;

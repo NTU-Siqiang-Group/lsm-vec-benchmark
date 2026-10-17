@@ -27,3 +27,9 @@ chat_history.md
 # stray SPFresh artifact
 DeletedIDs.bin
 *.bin
+
+# --- dev / diagnostic runners (local only) ---
+driver/local/
+driver/spfresh_driver_u8
+driver/spfresh_driver_i8
+driver/tools/lsm_inspect

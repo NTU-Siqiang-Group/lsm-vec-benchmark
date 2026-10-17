@@ -42,12 +42,23 @@
 #include "utils.h"
 #include "v2/merge_insert.h"
 
+// Element type of the stored vectors (PVLDB revision Step 1: native-byte baselines).
+// -DBSM_VT_UINT8 -> uint8 (SIFT, <name>.u8bin); -DBSM_VT_INT8 -> int8 (SPACEV, <name>.i8bin);
+// default float (<name>.fbin), the V2 configuration. PQ budget and all other settings are unchanged.
+#if defined(BSM_VT_UINT8)
+using VT = uint8_t;  using VTDist = diskann::DistanceL2UInt8; static const char *kExt = "u8bin";
+#elif defined(BSM_VT_INT8)
+using VT = int8_t;   using VTDist = diskann::DistanceL2Int8;  static const char *kExt = "i8bin";
+#else
+using VT = float;    using VTDist = diskann::DistanceL2;      static const char *kExt = "fbin";
+#endif
+
 namespace
 {
 using clk = std::chrono::high_resolution_clock;
 
 // .fbin : int32 n, int32 d, then n*d float32. Loaded with row stride aligned_dim (mult of 8).
-float *load_fbin_aligned(const std::string &path, size_t &n, size_t &d, size_t &aligned_dim)
+VT *load_fbin_aligned(const std::string &path, size_t &n, size_t &d, size_t &aligned_dim)
 {
     std::ifstream in(path, std::ios::binary);
     if (!in)
@@ -58,14 +69,28 @@ float *load_fbin_aligned(const std::string &path, size_t &n, size_t &d, size_t &
     n = static_cast<size_t>(ni);
     d = static_cast<size_t>(di);
     aligned_dim = ROUND_UP(d, 8);
-    float *buf = static_cast<float *>(std::calloc(n * aligned_dim, sizeof(float)));
+    VT *buf = static_cast<VT *>(std::calloc(n * aligned_dim, sizeof(VT)));
     if (buf == nullptr)
         throw std::runtime_error("calloc failed for fbin: " + path);
     for (size_t i = 0; i < n; ++i)
-        in.read(reinterpret_cast<char *>(buf + i * aligned_dim), d * sizeof(float));
+        in.read(reinterpret_cast<char *>(buf + i * aligned_dim), d * sizeof(VT));
     if (!in)
         throw std::runtime_error("short read on fbin: " + path);
     return buf;
+}
+
+// Cumulative physical disk I/O of this process (incl. background threads) from /proc/self/io.
+void proc_io(unsigned long long &rd, unsigned long long &wr)
+{
+    rd = wr = 0;
+    std::ifstream f("/proc/self/io");
+    std::string k;
+    unsigned long long v;
+    while (f >> k >> v)
+    {
+        if (k == "read_bytes:") rd = v;
+        else if (k == "write_bytes:") wr = v;
+    }
 }
 
 std::vector<uint32_t> load_u32(const std::string &path)
@@ -110,6 +135,18 @@ std::string epoch_path(const std::string &dir, int epoch, const char *suffix)
     os << dir << "/epoch_" << std::setw(3) << std::setfill('0') << epoch << suffix;
     return os.str();
 }
+
+long read_vmstatus_kb(const char *key)
+{
+    std::ifstream f("/proc/self/status");
+    std::string line;
+    size_t klen = strlen(key);
+    while (std::getline(f, line))
+        if (line.compare(0, klen, key) == 0)
+            return atol(line.c_str() + klen);
+    return 0;
+}
+double rss_anon_mb() { return read_vmstatus_kb("RssAnon:") / 1024.0; }
 
 long read_vmrss_kb()
 {
@@ -273,7 +310,8 @@ struct MemSampler
             {
                 double t = std::chrono::duration<double>(clk::now() - t0).count();
                 out << "{\"t_sec\":" << std::fixed << std::setprecision(1) << t << ",\"epoch\":" << epoch.load()
-                    << ",\"rss_mb\":" << std::setprecision(1) << rss_mb() << "}\n";
+                    << ",\"rss_mb\":" << std::setprecision(1) << rss_mb()
+                    << ",\"rss_anon_mb\":" << std::setprecision(1) << rss_anon_mb() << "}\n";
                 out.flush();
                 for (int i = 0; i < 10 && !stop.load(); ++i)
                     std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -292,7 +330,7 @@ struct MemSampler
 
 int main(int argc, char **argv)
 {
-    std::string trace, out_path, mem_path, index_prefix, work_dir;
+    std::string trace, out_path, mem_path, index_prefix, work_dir, sweep_arg;
     uint32_t search_L = 150;
     uint32_t R_mem = 64, L_mem = 75;
     uint32_t R_disk = 64, L_disk = 75;
@@ -316,6 +354,8 @@ int main(int argc, char **argv)
             trace = next();
         else if (a == "--out")
             out_path = next();
+        else if (a == "--query-sweep")
+            sweep_arg = next();
         else if (a == "--mem")
             mem_path = next();
         else if (a == "--index_prefix")
@@ -371,11 +411,15 @@ int main(int argc, char **argv)
 
     // ---- load base / pool / query (aligned) ----
     size_t base_n, dim, adim;
-    float *base = load_fbin_aligned(trace + "/base.fbin", base_n, dim, adim);
+    VT *base = load_fbin_aligned(trace + "/base." + kExt, base_n, dim, adim);
     std::vector<uint32_t> base_ids = load_u32(trace + "/base.ids.u32");
+    // base[] is never read again (build_disk_index re-reads base.fbin by path);
+    // keeping it resident charged 0.5GB@1M / 4.8GB@10M of dead weight to RSS.
+    diskann::aligned_free(base);
+    base = nullptr;
 
     size_t pool_n, pdim, padim;
-    float *pool = load_fbin_aligned(trace + "/pool.fbin", pool_n, pdim, padim);
+    VT *pool = load_fbin_aligned(trace + "/pool." + kExt, pool_n, pdim, padim);
     std::vector<uint32_t> pool_ids = load_u32(trace + "/pool.ids.u32");
     std::unordered_map<uint32_t, size_t> pool_index;
     pool_index.reserve(pool_n * 2);
@@ -383,7 +427,7 @@ int main(int argc, char **argv)
         pool_index[pool_ids[i]] = i;
 
     size_t q_n, qdim, qadim;
-    float *query = load_fbin_aligned(trace + "/query.fbin", q_n, qdim, qadim);
+    VT *query = load_fbin_aligned(trace + "/query." + kExt, q_n, qdim, qadim);
 
     std::cout << "base_n=" << base_n << " dim=" << dim << " pool_n=" << pool_n << " q_n=" << q_n << std::endl;
     if (pdim != dim || qdim != dim)
@@ -424,7 +468,7 @@ int main(int argc, char **argv)
     {
         std::cout << "building disk index: prefix=" << index_prefix << " params=[" << bparams.str() << "]" << std::endl;
         auto build_t0 = clk::now();
-        bool ok = diskann::build_disk_index<float>((trace + "/base.fbin").c_str(), index_prefix.c_str(),
+        bool ok = diskann::build_disk_index<VT>((trace + "/base." + kExt).c_str(), index_prefix.c_str(),
                                                    bparams.str().c_str(), diskann::Metric::L2,
                                                    /*single_file_index=*/false, tags_file.c_str());
         if (!ok)
@@ -452,7 +496,7 @@ int main(int argc, char **argv)
     paras.Set<unsigned>("nodes_to_cache", 0);
     paras.Set<unsigned>("num_search_threads", std::max<int>(build_threads, 2));
 
-    diskann::DistanceL2 dist_cmp;
+    VTDist dist_cmp;
     std::string mem_prefix = index_prefix + "_mem_short";
     std::string merge_prefix = index_prefix + "_merge";
     // Mem-index capacity is sized as merge_th*2. Default to pool_n (+headroom) so the empty
@@ -462,11 +506,17 @@ int main(int argc, char **argv)
         mem_capacity_th = pool_n + 1000;
     std::cout << "mem_capacity_th=" << mem_capacity_th << " (mem-index capacity=" << (mem_capacity_th * 2) << " pts)"
               << std::endl;
-    diskann::MergeInsert<float, uint32_t> sync_index(paras, dim, mem_prefix, index_prefix, merge_prefix, &dist_cmp,
+    diskann::MergeInsert<VT, uint32_t> sync_index(paras, dim, mem_prefix, index_prefix, merge_prefix, &dist_cmp,
                                                      diskann::Metric::L2, /*single_file=*/false, work_dir,
                                                      mem_capacity_th);
 
     std::ofstream jout(out_path);
+    // iso-recall Pareto: query-only search-L sweep at epoch 0 + last (--query-sweep "a,b,c").
+    std::vector<uint32_t> sweepLs;
+    { std::stringstream ss(sweep_arg); std::string t;
+      while (std::getline(ss, t, ',')) if (!t.empty()) sweepLs.push_back((uint32_t)std::stoul(t)); }
+    std::ofstream sweepJs;
+    if (!sweepLs.empty()) sweepJs.open(out_path + ".sweep.jsonl");
     jout << std::fixed;
 
     long long live_n = static_cast<long long>(base_n);
@@ -487,6 +537,10 @@ int main(int argc, char **argv)
         std::vector<uint32_t> del = load_u32(epoch_path(trace, e, ".del.u32"));
 
         // ---- apply phase: deletes then inserts (single-thread; MergeInsert is the system) ----
+        // Maintenance I/O window: deletes + inserts + any StreamingMerge this epoch, so merge
+        // writes are charged per insert (the ins_ops_s column excludes merge time; this does not).
+        unsigned long long io_r0, io_w0;
+        proc_io(io_r0, io_w0);
         auto del_t0 = clk::now();
         for (uint32_t gid : del)
         {
@@ -519,6 +573,10 @@ int main(int argc, char **argv)
             ++merge_count;
             deleted_ids.clear(); // merged-out deletes are now physically gone from the SSD index
         }
+        unsigned long long io_r1, io_w1;
+        proc_io(io_r1, io_w1);
+        double ins_rd_kb = ins.empty() ? 0.0 : (io_r1 - io_r0) / 1024.0 / ins.size();
+        double ins_wr_kb = ins.empty() ? 0.0 : (io_w1 - io_w0) / 1024.0 / ins.size();
 
         // ---- query phase (single-threaded for clean per-query latency) ----
         std::ostringstream gtos;
@@ -589,12 +647,44 @@ int main(int argc, char **argv)
         jout << ",\"qps\":" << std::setprecision(2) << qps << ",\"lat_mean_ms\":" << std::setprecision(3) << mean_ms
              << ",\"lat_p50_ms\":" << p50 << ",\"lat_p99_ms\":" << p99 << ",\"ins_ops_s\":" << std::setprecision(2)
              << ins_ops_s << ",\"del_ops_s\":" << del_ops_s << ",\"rss_mb\":" << std::setprecision(1) << rss_mb()
-             << ",\"disk_mb\":" << disk_mb << ",\"query_io_per_query\":" << 0 << "}\n";
+             << ",\"disk_mb\":" << disk_mb << ",\"rss_anon_mb\":" << rss_anon_mb()
+             << ",\"ins_read_kb_per_op\":" << ins_rd_kb << ",\"ins_write_kb_per_op\":" << ins_wr_kb
+             << ",\"query_io_per_query\":" << 0 << "}\n";
         jout.flush();
 
         std::cout << "epoch " << e << " live_n=" << live_n
                   << " recall10=" << (have_gt ? std::to_string(recall_sum / std::max<size_t>(recall_q, 1)) : "null")
                   << " qps=" << qps << " p50=" << p50 << "ms p99=" << p99 << "ms disk_mb=" << disk_mb << std::endl;
+
+        // ---- iso-recall Pareto: query-only search-L sweep at epoch 0 and last epoch ----
+        if (have_gt && !sweepLs.empty() && (e == 0 || e == n_epochs - 1))
+        {
+            for (uint32_t sL : sweepLs)
+            {
+                uint32_t useL = std::max<uint32_t>(sL, K);
+                std::vector<double> sl; sl.reserve(q_n);
+                double rsum = 0.0; size_t rq = 0;
+                for (size_t qi = 0; qi < q_n; ++qi)
+                {
+                    diskann::QueryStats st2; st2.n_current_used = 1e9;
+                    for (uint32_t r = 0; r < K; ++r) { tags[r] = std::numeric_limits<uint32_t>::max(); dists[r] = std::numeric_limits<float>::max(); }
+                    auto s0 = clk::now();
+                    sync_index.search_sync(query + qi * qadim, K, useL, tags.data(), dists.data(), &st2);
+                    sl.push_back(std::chrono::duration<double, std::milli>(clk::now() - s0).count());
+                    std::unordered_set<uint32_t> truth; size_t topk = std::min<size_t>(K, gt_K);
+                    for (size_t r = 0; r < topk; ++r) truth.insert(gt_ids[qi * gt_K + r]);
+                    size_t hit = 0;
+                    for (uint32_t r = 0; r < K; ++r) { uint32_t gid = tags[r]; if (gid != std::numeric_limits<uint32_t>::max() && truth.count(gid)) ++hit; }
+                    rsum += static_cast<double>(hit) / static_cast<double>(topk); ++rq;
+                }
+                double sm = std::accumulate(sl.begin(), sl.end(), 0.0) / std::max<size_t>(sl.size(), 1);
+                sweepJs << "{\"epoch\":" << e << ",\"ef\":" << useL
+                        << ",\"recall10\":" << std::setprecision(4) << (rsum / std::max<size_t>(rq, 1))
+                        << ",\"lat_mean_ms\":" << std::setprecision(3) << sm
+                        << ",\"lat_p99_ms\":" << pctl(sl, 0.99) << ",\"live_n\":" << live_n << "}\n";
+                sweepJs.flush();
+            }
+        }
     }
 
     jout.close();
